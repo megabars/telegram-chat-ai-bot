@@ -1,0 +1,5 @@
+aiogram==3.31.0
+openai==3.24.0
+python-dotenv==1.2.4
+Telethon==1.45.0
+aiosqlite==0.22.1
