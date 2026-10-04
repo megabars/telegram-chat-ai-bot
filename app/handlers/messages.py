@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager, suppress
 
 from aiogram import Bot, Router
@@ -34,6 +35,8 @@ LOCAL_RATE_LIMIT = "Слишком много запросов. Попробуй
 MODEL_RATE_LIMIT = "Сейчас слишком много запросов. Попробуй чуть позже."
 TEMPORARY_ERROR = "Не удалось получить ответ от модели. Попробуй ещё раз немного позже."
 TELEGRAM_ERRORS = (TelegramAPIError, TelegramNetworkError)
+EPTIL_REPLY = "ептиль бля 🙂"
+EPTIL_PATTERN = re.compile(r"(?<!\w)(?:ептиль|ёптиль)(?!\w)", re.IGNORECASE)
 
 
 @asynccontextmanager
@@ -96,6 +99,9 @@ class MessageHandler:
         try:
             args = context_command_args(message, self.bot_username)
             await self._store(message)
+            if self._is_eptil_message(message):
+                await self._send(bot, message, EPTIL_REPLY)
+                return
             await self._handle_ai(message, bot, args)
         except asyncio.CancelledError:
             raise
@@ -113,6 +119,16 @@ class MessageHandler:
             logger.debug("Ignored message chat_id=%d reason=chat_not_allowed", message.chat.id)
             return False
         return True
+
+    @staticmethod
+    def _is_eptil_message(message: Message) -> bool:
+        return bool(
+            message.text
+            and message.from_user
+            and not message.from_user.is_bot
+            and message.sender_chat is None
+            and EPTIL_PATTERN.search(message.text)
+        )
 
     async def _store(self, message: Message, *, edited: bool = False) -> None:
         if self.local_history is None or not self.settings.local_history_enabled:

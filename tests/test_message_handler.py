@@ -49,6 +49,13 @@ async def test_mention_only_is_local(handler, sdk, telegram):
     assert telegram.send_message.call_args.kwargs["text"] == EMPTY_PROMPT
 
 
+@pytest.mark.parametrize("text", ["ептиль", "ЕПТИЛЬ", "ЁпТиЛь"])
+async def test_eptil_reply_does_not_call_model(handler, sdk, telegram, text):
+    await handler.handle(make_message(text, entities=False), telegram)
+    sdk.responses.create.assert_not_awaited()
+    assert telegram.send_message.call_args.kwargs["text"] == "ептиль бля 🙂"
+
+
 async def test_disallowed_chat(handler, sdk, telegram, settings):
     handler.settings = replace(settings, allowed_chat_ids=frozenset({-999}))
     await handler.handle(make_message(), telegram)
