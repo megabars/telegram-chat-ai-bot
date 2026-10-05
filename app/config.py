@@ -38,6 +38,11 @@ class Settings:
     context_command_max_messages: int = 200
     context_max_chars: int = 50000
     context_respect_topics: bool = True
+    daily_digest_enabled: bool = True
+    daily_digest_hour: int = 9
+    daily_digest_timezone: str = "Asia/Tomsk"
+    daily_digest_context_chars: int = 120000
+    daily_digest_max_output_tokens: int = 600
 
     def __post_init__(self) -> None:
         for name in ("telegram_bot_token", "openai_api_key", "openai_model"):
@@ -58,6 +63,8 @@ class Settings:
             "context_command_default_messages",
             "context_command_max_messages",
             "context_max_chars",
+            "daily_digest_context_chars",
+            "daily_digest_max_output_tokens",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -80,6 +87,8 @@ class Settings:
             raise ConfigurationError(
                 "CONTEXT_COMMAND_DEFAULT_MESSAGES must not exceed MAX_MESSAGES"
             )
+        if not 0 <= self.daily_digest_hour <= 23:
+            raise ConfigurationError("DAILY_DIGEST_HOUR must be between 0 and 23")
 
     @classmethod
     def from_env(cls, env_file: str | Path = ".env") -> "Settings":
@@ -147,4 +156,9 @@ class Settings:
             context_command_max_messages=number("CONTEXT_COMMAND_MAX_MESSAGES", 200),
             context_max_chars=number("CONTEXT_MAX_CHARS", 50000),
             context_respect_topics=boolean("CONTEXT_RESPECT_TOPICS", True),
+            daily_digest_enabled=boolean("DAILY_DIGEST_ENABLED", True),
+            daily_digest_hour=number("DAILY_DIGEST_HOUR", 9),
+            daily_digest_timezone=os.getenv("DAILY_DIGEST_TIMEZONE", "Asia/Tomsk").strip(),
+            daily_digest_context_chars=number("DAILY_DIGEST_CONTEXT_CHARS", 120000),
+            daily_digest_max_output_tokens=number("DAILY_DIGEST_MAX_OUTPUT_TOKENS", 600),
         )

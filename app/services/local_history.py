@@ -34,6 +34,13 @@ CREATE INDEX IF NOT EXISTS idx_telegram_messages_chat_message
 ON telegram_messages(chat_id, message_id DESC);
 CREATE INDEX IF NOT EXISTS idx_telegram_messages_chat_topic_message
 ON telegram_messages(chat_id, message_thread_id, message_id DESC);
+CREATE TABLE IF NOT EXISTS daily_digests (
+    chat_id INTEGER NOT NULL,
+    digest_date TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message_id INTEGER,
+    PRIMARY KEY (chat_id, digest_date)
+);
 """
 INSERT = """INSERT OR IGNORE INTO telegram_messages (
     chat_id, message_id, message_thread_id, sender_id, sender_name, sender_username,
@@ -292,3 +299,47 @@ class LocalHistoryService:
             )
             for row in reversed(rows)
         )
+
+    async def get_daily_chat_ids(self, start_timestamp: int, end_timestamp: int) -> tuple[int, ...]:
+        async with self._lock:
+            rows = await self._db().execute_fetchall(
+                "SELECT DISTINCT chat_id FROM telegram_messages WHERE timestamp>=? AND timestamp<?",
+                (start_timestamp, end_timestamp),
+            )
+        return tuple(row["chat_id"] for row in rows)
+
+    async def get_daily_messages(
+        self, chat_id: int, start_timestamp: int, end_timestamp: int
+    ) -> tuple[ContextMessage, ...]:
+        async with self._lock:
+            rows = await self._db().execute_fetchall(
+                "SELECT * FROM telegram_messages WHERE chat_id=? AND timestamp>=? AND timestamp<? "
+                "ORDER BY message_id",
+                (chat_id, start_timestamp, end_timestamp),
+            )
+        return tuple(
+            ContextMessage(
+                message_id=row["message_id"], sender_id=row["sender_id"],
+                sender_name=row["sender_name"], sender_username=row["sender_username"],
+                timestamp=datetime.fromtimestamp(row["timestamp"], UTC), text=row["text"],
+                reply_to_message_id=row["reply_to_message_id"], is_bot=bool(row["is_bot"]),
+                is_current_bot=bool(row["is_our_bot"]),
+            ) for row in rows
+        )
+
+    async def start_daily_digest(self, chat_id: int, digest_date: str) -> bool:
+        async with self._lock:
+            cursor = await self._db().execute(
+                "INSERT OR IGNORE INTO daily_digests(chat_id, digest_date, status) VALUES (?, ?, 'sending')",
+                (chat_id, digest_date),
+            )
+            await self._db().commit()
+            return cursor.rowcount == 1
+
+    async def complete_daily_digest(self, chat_id: int, digest_date: str, message_id: int) -> None:
+        async with self._lock:
+            await self._db().execute(
+                "UPDATE daily_digests SET status='sent', message_id=? WHERE chat_id=? AND digest_date=?",
+                (message_id, chat_id, digest_date),
+            )
+            await self._db().commit()

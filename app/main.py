@@ -12,6 +12,7 @@ from app.config import ConfigurationError, Settings
 from app.handlers.messages import MessageHandler
 from app.logging_config import configure_logging
 from app.services.local_history import LocalHistoryService
+from app.services.daily_digest import DailyDigestService
 from app.services.openai_service import OpenAIService
 from app.services.telegram_history import TelegramHistoryService
 from app.utils.rate_limit import RateLimiter
@@ -26,6 +27,7 @@ async def run(settings: Settings) -> None:
     handler = None
     history = None
     local_history = None
+    daily_digest = None
     try:
         me = await bot.get_me()
         if not me.username:
@@ -34,6 +36,9 @@ async def run(settings: Settings) -> None:
             local_history = LocalHistoryService(settings, me.id)
             await local_history.start()
         service = OpenAIService(settings)
+        if local_history is not None:
+            daily_digest = DailyDigestService(settings, bot, local_history, service)
+            await daily_digest.start()
         if settings.reply_context_enabled:
             if settings.telegram_api_id and settings.telegram_api_hash:
                 candidate = TelegramHistoryService(settings, me.id)
@@ -61,6 +66,8 @@ async def run(settings: Settings) -> None:
         dispatcher = Dispatcher(disable_fsm=True)
         dispatcher.include_router(handler.router())
         dispatcher.shutdown.register(handler.shutdown)
+        if daily_digest is not None:
+            dispatcher.shutdown.register(daily_digest.shutdown)
         # Explicitly switch to polling; discard stale updates to avoid old charges.
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info(
@@ -89,10 +96,14 @@ async def run(settings: Settings) -> None:
                     await local_history.close()
             finally:
                 try:
-                    if service is not None:
-                        await service.close()
+                    if daily_digest is not None:
+                        await daily_digest.shutdown()
                 finally:
-                    await bot.session.close()
+                    try:
+                        if service is not None:
+                            await service.close()
+                    finally:
+                        await bot.session.close()
 
 
 def main() -> int:

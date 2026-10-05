@@ -156,5 +156,32 @@ class OpenAIService:
             logger.error("OpenAI failure kind=%s", type(exc).__name__)
             raise ModelUnavailable from None
 
+    async def generate_daily_digest(
+        self, prompt: str, context: ReplyContext, *, context_chars: int, max_output_tokens: int
+    ) -> str:
+        """Dedicated bounded path; it cannot alter /context request limits."""
+        context = limit_reply_context(context, context_chars - len(prompt), len(context.messages))
+        request_input = build_reply_inputs(prompt, context, None, limit_marker=RECENT_LIMIT_MARKER)
+        try:
+            async with asyncio.timeout(self.settings.openai_timeout_seconds):
+                async with self._semaphore:
+                    response = await self.client.responses.create(
+                        model=self.settings.openai_model,
+                        instructions=self.instructions + "\n\n" + UNTRUSTED_CONTEXT_INSTRUCTIONS,
+                        input=request_input,
+                        store=False,
+                        max_output_tokens=max_output_tokens,
+                    )
+            answer = response.output_text.strip()
+            if not answer:
+                raise ModelUnavailable
+            return answer
+        except asyncio.CancelledError:
+            raise
+        except RateLimitError:
+            raise ModelRateLimited from None
+        except (APITimeoutError, TimeoutError, APIConnectionError, AuthenticationError, APIStatusError, OpenAIError):
+            raise ModelUnavailable from None
+
     async def close(self) -> None:
         await self.client.close()

@@ -181,6 +181,15 @@ synchronous=NORMAL, индексы chat/message и chat/topic/message. Counters 
 `LOCAL_HISTORY_ENABLED=false` прекращает запись, `/context` отвечает локально;
 старый файл не удаляется, mention/reply-chain продолжают работать.
 
+### Ежедневная сводка
+
+При `DAILY_DIGEST_ENABLED=true` бот в `DAILY_DIGEST_HOUR` по
+`DAILY_DIGEST_TIMEZONE` публикует одну сводку вчерашнего дня для каждого чата,
+в котором были сообщения. Forum topics объединяются. Контекст ограничен
+`DAILY_DIGEST_CONTEXT_CHARS`; повторная отправка после перезапуска блокируется
+SQLite-записью. По умолчанию: 09:00 `Asia/Tomsk`, 120000 символов и 600 токенов
+вывода.
+
 ### Контекст цепочки ответов
 
 Только reply с новым mention запускает выбор конкретных ancestors. Telethon
