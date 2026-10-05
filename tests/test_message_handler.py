@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.methods import SendMessage
 from aiogram.types import Chat, Update, User
 
-from app.handlers.messages import EMPTY_PROMPT, LOCAL_RATE_LIMIT
+from app.handlers.messages import EMPTY_PROMPT, FUN_REPLIES, LOCAL_RATE_LIMIT
 from app.utils.rate_limit import RateLimiter
 from tests.conftest import make_message
 
@@ -49,11 +49,35 @@ async def test_mention_only_is_local(handler, sdk, telegram):
     assert telegram.send_message.call_args.kwargs["text"] == EMPTY_PROMPT
 
 
-@pytest.mark.parametrize("text", ["ептиль", "ЕПТИЛЬ", "ЁпТиЛь"])
-async def test_eptil_reply_does_not_call_model(handler, sdk, telegram, text):
+@pytest.mark.parametrize(
+    "text,trigger",
+    [
+        ("ептиль", "ептиль"),
+        ("ЕПТИЛЬ", "ептиль"),
+        ("Ну ЁпТиЛь бля", "ёптиль"),
+        ("сижу дома", "сижу"),
+        ("чекаво?", "чекаво"),
+    ],
+)
+async def test_fun_reply_does_not_call_model(handler, sdk, telegram, text, trigger):
     await handler.handle(make_message(text, entities=False), telegram)
     sdk.responses.create.assert_not_awaited()
-    assert telegram.send_message.call_args.kwargs["text"] == "ептиль бля 🙂"
+    assert telegram.send_message.call_args.kwargs["text"] in FUN_REPLIES[trigger]
+
+
+async def test_fun_reply_does_not_match_inside_word(handler, sdk, telegram):
+    await handler.handle(make_message("посижу нормально", entities=False), telegram)
+    sdk.responses.create.assert_not_awaited()
+    telegram.send_message.assert_not_awaited()
+
+
+async def test_fun_replies_rotate_without_immediate_repeat(handler, sdk, telegram):
+    replies = []
+    for _ in range(len(FUN_REPLIES["сижу"]) + 1):
+        await handler.handle(make_message("сижу", entities=False), telegram)
+        replies.append(telegram.send_message.call_args.kwargs["text"])
+    assert len(set(replies[:-1])) == len(FUN_REPLIES["сижу"])
+    assert replies[-1] != replies[-2]
 
 
 async def test_disallowed_chat(handler, sdk, telegram, settings):
