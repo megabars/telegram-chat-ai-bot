@@ -31,6 +31,10 @@ from app.logging_config import SafeLogFilter
         ("context_command_default_messages", 201),
         ("context_command_max_messages", 49),
         ("context_max_chars", 0),
+        ("daily_digest_hour", -1),
+        ("daily_digest_hour", 24),
+        ("daily_digest_context_chars", 0),
+        ("daily_digest_max_output_tokens", 0),
     ],
 )
 def test_invalid_config(settings, name, value):
@@ -54,6 +58,24 @@ def test_env_loading_precedence(tmp_path, monkeypatch):
     # load_dotenv writes os.environ; register cleanup for those added keys.
     for name in ("TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "ALLOWED_CHAT_IDS"):
         monkeypatch.setenv(name, "")
+
+
+@pytest.mark.parametrize("chat_ids", ["", " -1001, -1002, -1001 ", "SECRET_NOT_AN_ID"])
+def test_daily_digest_environment_defaults_and_opt_in(tmp_path, monkeypatch, chat_ids):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:test")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake")
+    monkeypatch.delenv("DAILY_DIGEST_ENABLED", raising=False)
+    monkeypatch.setenv("DAILY_DIGEST_CHAT_IDS", chat_ids)
+    if chat_ids == "SECRET_NOT_AN_ID":
+        with pytest.raises(ConfigurationError) as error:
+            Settings.from_env(tmp_path / "absent.env")
+        assert "SECRET" not in str(error.value)
+        return
+    settings = Settings.from_env(tmp_path / "absent.env")
+    assert not settings.daily_digest_enabled
+    assert settings.daily_digest_chat_ids == (
+        frozenset({-1001, -1002}) if chat_ids else frozenset()
+    )
 
 
 def test_secrets_and_exception_body_never_in_logs():

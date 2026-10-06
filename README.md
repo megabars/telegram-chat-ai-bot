@@ -21,7 +21,9 @@ Telethon и aiosqlite. Работает через long polling, без вход
   chat/topic из локального SQLite, строго до ID команды.
 
 Обычные сообщения сохраняются **только локально**: Telegram → Ubuntu → SQLite.
-Они не вызывают OpenAI, embeddings, moderation или Telethon fetch. Recent history
+Они не вызывают OpenAI, embeddings, moderation или Telethon fetch при получении.
+Опциональные ежедневные сводки передают сохранённую часть переписки в OpenAI
+по расписанию только для явно выбранных чатов; по умолчанию они выключены. Recent history
 не добавляется к обычному mention автоматически; два режима контекста не смешиваются.
 Бот не отвечает в личных чатах и каналах. Для запуска AI нужны текст и реальный
 human user ID: сообщения других ботов, captions, анонимных sender_chat, service
@@ -101,6 +103,30 @@ Telethon, установите `REPLY_CONTEXT_ENABLED=false`. Ограничьт
 ключей. `Ctrl+C` закрывает handlers, SQLite и клиентов. Альтернатива после настройки
 `.env`: `PYTHON_BIN=python3.12 ./install.sh`.
 
+### Логи запросов к модели
+
+Каждый фактический вызов OpenAI отмечается `OpenAI request sent`, после ответа —
+`OpenAI request completed`; перед ожиданием общей очереди пишется `OpenAI request queued`.
+В записях видны тип запроса (`mention`, `reply_chain`, `context_command` или
+`daily_digest`), модель, chat/message/date, число символов и элементов input,
+размер истории, была ли она обрезана, лимит ответа и timeout. Размер показывается
+как для содержимого input, так и для инструкций модели; общий размер складывает
+эти два значения. После ответа также
+пишутся ожидание очереди, длительность вызова и общая длительность. Если API вернул
+usage, журнал показывает input/output/total tokens, cached input tokens и reasoning
+tokens. Поля usage могут быть `unknown`, если провайдер их не вернул. Число символов
+не равно числу токенов и само по себе не является оценкой стоимости. Текст вопроса,
+история, содержимое ответа и API ключи не журналируются.
+
+```bash
+sudo journalctl -u telegram-openai-bot -f | grep --line-buffered 'OpenAI request'
+```
+
+`queued` означает, что запрос подготовлен и ждёт semaphore; `sent` пишется прямо
+перед вызовом OpenAI SDK; `completed` подтверждает успешный ответ. В `failed` указаны
+безопасный тип ошибки и HTTP status, если он доступен. Ручные обращения также имеют
+Telegram chat/message ID для сопоставления с исходным сообщением.
+
 ### Конфигурация
 
 | Переменная | По умолчанию | Назначение |
@@ -131,6 +157,12 @@ Telethon, установите `REPLY_CONTEXT_ENABLED=false`. Ограничьт
 | `CONTEXT_COMMAND_MAX_MESSAGES` | `200` | Максимально допустимое N |
 | `CONTEXT_MAX_CHARS` | `50000` | Recent input: JSON, вопрос и marker |
 | `CONTEXT_RESPECT_TOPICS` | `true` | Выбирать только текущую forum topic |
+| `DAILY_DIGEST_ENABLED` | `false` | Явно включить платные сводки по расписанию |
+| `DAILY_DIGEST_CHAT_IDS` | `empty / пусто` | Отдельный список chat IDs для сводок через запятую |
+| `DAILY_DIGEST_HOUR` | `9` | Час отправки, от 0 до 23 |
+| `DAILY_DIGEST_TIMEZONE` | `Asia/Tomsk` | IANA timezone; проверяется при включённых сводках |
+| `DAILY_DIGEST_CONTEXT_CHARS` | `120000` | Input budget сводки: JSON, вопрос и markers |
+| `DAILY_DIGEST_MAX_OUTPUT_TOKENS` | `600` | Output budget сводки, включая reasoning |
 
 Boolean values — только `true`/`false`, числовые лимиты положительны, таймауты конечны.
 Cleanup threshold должен быть больше max messages; default N не больше max N.
@@ -192,6 +224,60 @@ synchronous=NORMAL, индексы chat/message и chat/topic/message. Counters 
 Нет TTL; неактивный chat остаётся до rolling replacement или ручной очистки.
 `LOCAL_HISTORY_ENABLED=false` прекращает запись, `/context` отвечает локально;
 старый файл не удаляется, mention/reply-chain продолжают работать.
+
+### Ежедневная сводка
+
+По умолчанию сводки **выключены**, включая обновление со старым `.env`.
+Чтобы включить их, добавьте в существующий `.env`:
+
+```dotenv
+DAILY_DIGEST_ENABLED=true
+DAILY_DIGEST_CHAT_IDS=-1001234567890,-987654321
+DAILY_DIGEST_HOUR=9
+DAILY_DIGEST_TIMEZONE=Asia/Tomsk
+```
+
+Нужны `LOCAL_HISTORY_ENABLED=true` и непустой список `DAILY_DIGEST_CHAT_IDS`.
+Если задан `ALLOWED_CHAT_IDS`, сводки доступны только пересечению двух списков;
+старые записи исключённого чата не читаются для AI и не отправляются. Проверьте
+`--check-config` и перезапустите сервис. Неверная timezone даёт ошибку конфигурации
+при включённых сводках и не мешает запуску при выключенных.
+
+После указанного часа планировщик раз в минуту проверяет сводку **вчерашнего
+календарного дня** в выбранной timezone. Границы дня учитывают переходы DST.
+При позднем запуске сводка за вчера догоняется; более ранние дни после долгого
+downtime не восстанавливаются. Пустая история не вызывает OpenAI. Включение —
+согласие на передачу сохранённых сообщений выбранных чатов в OpenAI по расписанию
+и соответствующие расходы. User rate limit относится к ручным обращениям;
+сводки используют общий AI semaphore/timeout и до трёх попыток на chat/date.
+
+Используется только rolling cache, который может содержать лишь часть дня.
+Свежая непрерывная часть истории имеет приоритет без выборочного удаления ответов
+на оставленные вопросы. `DAILY_DIGEST_CONTEXT_CHARS` включает JSON, вопрос и markers;
+отдельного запроса для предварительного сжатия нет. Forum topics одного чата
+включаются с отдельными условными метками без внутренних IDs; результат публикуется
+в General. Сводка на русском явно предупреждает о неполноте данных; модель получает
+инструкцию не считать отсутствие ответа доказательством нерешённого вопроса.
+По умолчанию бюджет — 120000 символов input и 600 output tokens, включая reasoning.
+
+SQLite хранит результат генерации, число попыток и подтверждения отправленных
+частей. Обычный сбой повторяется через 5 минут, Telegram FloodWait может увеличить
+ожидание; максимум три попытки за день, только пока этот день остаётся вчерашним.
+Готовый текст переиспользуется, подтверждённые части не отправляются заново,
+а записи собственных ответов восстанавливаются в cache для `/context`.
+Ошибка одного чата или временная ошибка SQLite не останавливает планировщик.
+При работающем планировщике delivery records и сохранённые тексты старше 30 дней
+удаляются; отключение сводок сохраняет существующие записи в SQLite.
+
+Если после отправки потеряно подтверждение Telegram, запись получает `uncertain`
+и автоматически не повторяется: сообщение могло уже прийти. Незавершённая
+генерация восстанавливается после истечения lease (OpenAI timeout + 120 секунд),
+но незавершённая отправка также становится `uncertain`. Для такой записи сначала
+проверьте чат и журнал; автоматическая exactly-once доставка невозможна.
+Исчерпанные попытки и `uncertain` требуют ручного решения, отдельной команды
+повторной отправки нет. Миграция прежней таблицы идемпотентна, отметки `sent`
+сохраняются; прежние зависшие `sending` тоже считаются неопределённой доставкой.
+Один экземпляр бота на token остаётся обязательным.
 
 ### Контекст цепочки ответов
 
@@ -301,7 +387,9 @@ sudo systemctl start telegram-openai-bot
 ```
 
 Не удаляйте `telegram.session`: это отдельная авторизация. Очистка SQLite не удаляет
-ничего в Telegram; cache начнёт наполняться заново. Автоматическая backup-система
+ничего в Telegram; cache начнёт наполняться заново. Она также удаляет delivery
+records сводок: при наличии вновь полученной истории сводка может повториться.
+Автоматическая backup-система
 не добавлена; этот cache не является критическим permanent archive.
 
 При каждом старте бот выполняет `deleteWebhook(drop_pending_updates=True)`: старые
@@ -316,6 +404,7 @@ DB и bot session, обнуляет in-memory rate limiter; exactly-once AI resp
 | --- | --- |
 | Нет ответа | group/supergroup, настоящий mention или /context entity, Group Privacy Disable, повторное добавление, право отправки, ALLOWED_CHAT_IDS |
 | Пустой /context | Получены ли новые сообщения после запуска; cache не загружает прежнюю переписку |
+| Нет ежедневной сводки | ENABLED, CHAT_IDS ∩ ALLOWED_CHAT_IDS, local history, час/timezone, записи retry/uncertain и число attempts в SQLite; журнал Daily digest |
 | Нет reply-chain | API ID/hash вместе; MTProto connectivity/session owner; в journal reason fallback |
 | SQLite PermissionError | State path вне /opt, owner telegrambot, directory 700 / DB 600, StateDirectory unit |
 | Telegram polling conflict | Другой процесс с тем же token или webhook; нужен один экземпляр |
@@ -344,11 +433,12 @@ Telegram handlers не больше concurrency×4, общий AI timeout вкл
 bash -n install.sh
 ```
 
-**245 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
+**305 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
 SQLite — только temporary databases. Есть проверки 100 обычных updates → 0 AI/fetch,
 /context → 1 AI, snapshot, topics, roles/injection, edits, outgoing messages,
 5100→5000 cleanup per chat, concurrency, lifecycle, deadlines, UTF-16 и безопасных
-логов. Тесты не проверяют права реального bot token или доступ API проекта.
+логов, opt-in сводок, DST, миграции, retries, частичной и неопределённой доставки.
+Тесты не проверяют права реального bot token или доступ API проекта.
 GitHub Actions запускает этот набор и проверки кода при push/pull_request без ключей.
 
 ```text
@@ -357,7 +447,8 @@ app/main.py                      startup/polling/shutdown
 app/handlers/messages.py         cache writes и явные AI triggers
 app/services/openai_service.py   один stateless Responses call
 app/services/telegram_history.py exact ancestor MTProto fetch
-app/services/local_history.py    async SQLite rolling cache
+app/services/local_history.py    async SQLite rolling cache и delivery records
+app/services/daily_digest.py     opt-in scheduler, bounded retries и outbox
 app/utils/                       mentions, commands, topics, rate limit, formatting
 telegram-openai-bot.service       hardened non-root systemd
 install.sh                       воспроизводимая установка production lock
@@ -393,7 +484,9 @@ HTTP port. The model is invoked through three explicit interactions:
   from the local SQLite cache for the current chat/topic, strictly before the command ID.
 
 Ordinary messages are stored **locally only**: Telegram → server → SQLite. They
-never trigger OpenAI, embeddings, moderation or Telethon fetch. Recent history is
+never trigger OpenAI, embeddings, moderation or Telethon fetch on receipt. Optional
+daily digests send cached history to OpenAI on a schedule only for explicitly selected
+chats; they are disabled by default. Recent history is
 not automatically added to mentions; the two context sources are not combined.
 Private chats and channels are unsupported. AI requires text from an identifiable
 human user; other bots, captions, anonymous sender_chat, service events and edits
@@ -474,6 +567,30 @@ to disable Telethon explicitly. Restrict groups through ALLOWED_CHAT_IDS, for ex
 or model access. Ctrl+C closes handlers, SQLite and clients. Alternatively, after
 configuring .env, run `PYTHON_BIN=python3.12 ./install.sh`.
 
+### Model request logs
+
+Each actual OpenAI call writes `OpenAI request sent`; a successful response writes
+`OpenAI request completed`. `OpenAI request queued` appears before waiting for the
+shared semaphore. Records show request type (`mention`, `reply_chain`,
+`context_command` or `daily_digest`), model, chat/message/date, input character and
+item counts, history size and whether it was trimmed, output limit and timeout.
+Sizes are logged for input content and model instructions separately; the total
+request size is their sum.
+Completion also records queue wait, API duration and total duration. When the API
+returns usage, logs show input/output/total tokens, cached input tokens and reasoning
+tokens. Usage fields may be `unknown` if the provider omits them. Character counts
+are not token counts or a cost estimate. Prompts, conversation text, answers and API
+keys are never logged.
+
+```bash
+sudo journalctl -u telegram-openai-bot -f | grep --line-buffered 'OpenAI request'
+```
+
+`queued` means the request is prepared and waiting for the semaphore; `sent` is logged
+immediately before the OpenAI SDK call; `completed` confirms a successful response.
+`failed` logs a safe error type and HTTP status when available. Manual request records
+include Telegram chat/message IDs to match them with the incoming message.
+
 ### Configuration
 
 | Variable | Default | Purpose |
@@ -504,6 +621,12 @@ configuring .env, run `PYTHON_BIN=python3.12 ./install.sh`.
 | `CONTEXT_COMMAND_MAX_MESSAGES` | `200` | Largest permitted N |
 | `CONTEXT_MAX_CHARS` | `50000` | Recent input: JSON, question and marker |
 | `CONTEXT_RESPECT_TOPICS` | `true` | Select only the current forum topic |
+| `DAILY_DIGEST_ENABLED` | `false` | Explicitly enable paid scheduled summaries |
+| `DAILY_DIGEST_CHAT_IDS` | `empty / пусто` | Separate comma-separated chat IDs opting into digests |
+| `DAILY_DIGEST_HOUR` | `9` | Delivery hour, from 0 to 23 |
+| `DAILY_DIGEST_TIMEZONE` | `Asia/Tomsk` | IANA timezone, validated when digests are enabled |
+| `DAILY_DIGEST_CONTEXT_CHARS` | `120000` | Digest input budget: JSON, prompt and markers |
+| `DAILY_DIGEST_MAX_OUTPUT_TOKENS` | `600` | Digest output budget including reasoning |
 
 Booleans accept only true/false; numeric limits must be positive and timeouts finite.
 Cleanup threshold must exceed max messages; default N cannot exceed maximum N.
@@ -566,6 +689,58 @@ per-cleanup VACUUM. File size may remain unchanged after DELETE because free pag
 are reused. There is no TTL; inactive chat records remain until rolling replacement
 or manual removal. LOCAL_HISTORY_ENABLED=false stops saving and makes /context
 respond locally; existing data is retained and mentions/reply chains still work.
+
+### Daily digests
+
+Digests are **disabled by default**, including upgrades using an existing .env.
+To enable them, add the following to your existing .env:
+
+```dotenv
+DAILY_DIGEST_ENABLED=true
+DAILY_DIGEST_CHAT_IDS=-1001234567890,-987654321
+DAILY_DIGEST_HOUR=9
+DAILY_DIGEST_TIMEZONE=Asia/Tomsk
+```
+
+LOCAL_HISTORY_ENABLED=true and a nonempty DAILY_DIGEST_CHAT_IDS are required.
+If ALLOWED_CHAT_IDS is set, only the intersection of both lists can receive digests;
+old cached records of excluded chats are not read for AI or sent. Run --check-config
+and restart the service. Invalid timezones fail validation when enabled and cannot
+prevent startup when digests are disabled.
+
+After the configured hour, the scheduler checks once per minute for **yesterday's
+calendar day** in the selected timezone, respecting DST day boundaries. Late startup
+catches up yesterday only; older days after a long outage are not recovered.
+Empty history triggers no AI. Enabling this feature authorizes scheduled transmission
+of selected chats' cached messages to OpenAI and incurs API costs. User rate limits
+apply to manual requests; digests share the AI semaphore/timeout and allow up to three
+attempts per chat/date.
+
+Input comes only from the rolling cache and may represent a partial day. Trimming
+keeps a contiguous recent suffix instead of cherry-picking questions without their
+answers. DAILY_DIGEST_CONTEXT_CHARS includes JSON, prompt and markers; no preliminary
+summarization request is made. Forum topics within one chat carry separate opaque
+labels without internal IDs, and the digest is posted to General. Output is in Russian
+and explicitly warns about incomplete history; instructions prohibit interpreting a
+missing answer as proof that a question remains unresolved. Defaults: 120000 input
+characters and 600 output tokens, including reasoning.
+
+SQLite persists generated text, attempt counts and acknowledged message parts.
+Recoverable failures retry after five minutes; Telegram FloodWait may extend this.
+There are at most three attempts, and retries stop when the target date is no longer
+yesterday. Prepared text is reused; acknowledged parts are not sent again, and outgoing
+cache entries are repaired for /context. One chat's failure or a transient SQLite error
+does not kill the scheduler. While the scheduler is running, delivery records and
+stored outputs older than 30 days are pruned. Disabling digests retains existing SQLite records.
+
+If Telegram's send acknowledgement is lost, the record becomes uncertain and is not
+retried automatically: the message may already have arrived. Interrupted generation
+can recover after the lease expires (OpenAI timeout + 120 seconds); interrupted sends
+also become uncertain. Check the chat and logs first; automatic exactly-once delivery
+cannot be guaranteed. Exhausted attempts and uncertain deliveries need manual review;
+there is no dedicated resend command. Schema migration is idempotent and preserves
+sent markers; legacy stuck sending records are also treated as uncertain. Run only
+one instance per bot token.
 
 ### Reply-chain context
 
@@ -676,7 +851,8 @@ sudo systemctl start telegram-openai-bot
 ```
 
 Do not delete telegram.session: it is separate authorization state. Clearing SQLite
-does not remove anything from Telegram; new updates refill the cache. No automatic
+does not remove anything from Telegram; new updates refill the cache. This also deletes
+digest delivery records: a digest can be repeated if history is received again. No automatic
 backup system is included; the cache is not a critical permanent archive.
 
 At every startup the bot calls deleteWebhook(drop_pending_updates=True), disabling
@@ -691,6 +867,7 @@ exactly-once AI responses following a crash.
 | --- | --- |
 | No answer | group/supergroup, actual mention or /context entity, privacy Disable, re-add bot, send permission, ALLOWED_CHAT_IDS |
 | Empty /context | New updates delivered since startup; older Telegram history is not backfilled |
+| Missing daily digest | ENABLED, CHAT_IDS ∩ ALLOWED_CHAT_IDS, local history, hour/timezone, retry/uncertain records and attempt counts in SQLite; Daily digest logs |
 | Missing reply chain | Both API ID/hash, MTProto connectivity/session owner; journal fallback reason |
 | SQLite PermissionError | State path outside /opt, telegrambot owner, directory 700 / DB 600, StateDirectory |
 | Telegram polling conflict | Another process using this token or a webhook; run one instance |
@@ -719,11 +896,12 @@ does not guarantee zero charges if the provider has started processing it.
 bash -n install.sh
 ```
 
-**245 offline tests** pass on Python 3.12. Tests block network
+**305 offline tests** pass on Python 3.12. Tests block network
 access and use temporary SQLite databases only. Coverage includes 100 ordinary
 updates → 0 AI/fetch, /context → 1 AI, snapshots, topics, roles/injection, edits,
 outgoing messages, per-chat 5100→5000 cleanup, concurrency, lifecycle, deadlines,
-UTF-16 and safe logs. Tests do not verify real credentials or API project access.
+UTF-16, safe logs, digest opt-in, DST, migration, retries, partial and uncertain delivery.
+Tests do not verify real credentials or API project access.
 GitHub Actions runs the suite and code checks on push/pull_request without keys.
 
 ```text
@@ -732,7 +910,8 @@ app/main.py                      startup/polling/shutdown
 app/handlers/messages.py         cache writes and explicit AI triggers
 app/services/openai_service.py   one stateless Responses call
 app/services/telegram_history.py exact ancestor MTProto fetch
-app/services/local_history.py    async SQLite rolling cache
+app/services/local_history.py    async SQLite rolling cache and delivery records
+app/services/daily_digest.py     opt-in scheduler, bounded retries and outbox
 app/utils/                       mentions, commands, topics, rate limit, formatting
 telegram-openai-bot.service       hardened non-root systemd
 install.sh                       reproducible production-lock installation
