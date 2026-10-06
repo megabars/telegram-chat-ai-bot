@@ -160,8 +160,20 @@ class OpenAIService:
         self, prompt: str, context: ReplyContext, *, context_chars: int, max_output_tokens: int
     ) -> str:
         """Dedicated bounded path; it cannot alter /context request limits."""
-        context = limit_reply_context(context, context_chars - len(prompt), len(context.messages))
+        current_chars = len(render_current_question(prompt, None))
+        if current_chars > context_chars or not context.messages:
+            raise ValueError("Daily digest needs history and a budget for the current prompt")
+        context = limit_reply_context(
+            context,
+            context_chars - current_chars,
+            len(context.messages),
+            limit_marker=RECENT_LIMIT_MARKER,
+        )
+        if not context.messages:
+            raise ValueError("Daily digest context cannot fit within its budget")
         request_input = build_reply_inputs(prompt, context, None, limit_marker=RECENT_LIMIT_MARKER)
+        if sum(len(item["content"]) for item in request_input) > context_chars:
+            raise ValueError("Daily digest input exceeds context budget")
         try:
             async with asyncio.timeout(self.settings.openai_timeout_seconds):
                 async with self._semaphore:
@@ -180,7 +192,14 @@ class OpenAIService:
             raise
         except RateLimitError:
             raise ModelRateLimited from None
-        except (APITimeoutError, TimeoutError, APIConnectionError, AuthenticationError, APIStatusError, OpenAIError):
+        except (
+            APITimeoutError,
+            TimeoutError,
+            APIConnectionError,
+            AuthenticationError,
+            APIStatusError,
+            OpenAIError,
+        ):
             raise ModelUnavailable from None
 
     async def close(self) -> None:

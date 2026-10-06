@@ -107,7 +107,7 @@ async def test_concurrency_and_cancellation(settings, sdk):
     assert active == 0
 
 
-@pytest.mark.parametrize("with_context", [False, True, "recent"])
+@pytest.mark.parametrize("with_context", [False, True, "recent", "daily"])
 async def test_real_sdk_serializes_selected_input(settings, with_context):
     requests = []
 
@@ -144,9 +144,14 @@ async def test_real_sdk_serializes_selected_input(settings, with_context):
             if with_context == "recent"
             else {"context": context if with_context else None}
         )
-        assert (
-            await OpenAIService(settings, client).generate("объясни Docker", **options) == "Ответ"
-        )
+        service = OpenAIService(settings, client)
+        if with_context == "daily":
+            answer = await service.generate_daily_digest(
+                "объясни Docker", context, context_chars=5000, max_output_tokens=600
+            )
+        else:
+            answer = await service.generate("объясни Docker", **options)
+        assert answer == "Ответ"
     assert len(requests) == 1
     body = json.loads(requests[0].content)
     if with_context:

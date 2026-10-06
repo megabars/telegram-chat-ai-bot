@@ -34,11 +34,19 @@ CREATE INDEX IF NOT EXISTS idx_telegram_messages_chat_message
 ON telegram_messages(chat_id, message_id DESC);
 CREATE INDEX IF NOT EXISTS idx_telegram_messages_chat_topic_message
 ON telegram_messages(chat_id, message_thread_id, message_id DESC);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_timestamp
+ON telegram_messages(timestamp, chat_id);
 CREATE TABLE IF NOT EXISTS daily_digests (
     chat_id INTEGER NOT NULL,
     digest_date TEXT NOT NULL,
     status TEXT NOT NULL,
     message_id INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    retry_at INTEGER NOT NULL DEFAULT 0,
+    payload TEXT,
+    part_index INTEGER NOT NULL DEFAULT 0,
+    sent_messages TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (chat_id, digest_date)
 );
 """
@@ -75,6 +83,7 @@ class LocalHistoryService:
             await self._connection.execute("PRAGMA synchronous=NORMAL")
             await self._connection.execute("PRAGMA foreign_keys=ON")
             await self._connection.executescript(SCHEMA)
+            await self._migrate_digest_schema()
             rows = await self._connection.execute_fetchall(
                 "SELECT chat_id, COUNT(*) AS count FROM telegram_messages GROUP BY chat_id"
             )
@@ -127,22 +136,11 @@ class LocalHistoryService:
             return False
         topic_id = forum_topic_id(message)
 
-        # Application credentials must never be copied into the cache accidentally.
-        def redact(value: str | None):
-            for secret in (
-                self.settings.telegram_bot_token,
-                self.settings.openai_api_key,
-                self.settings.telegram_api_hash,
-            ):
-                if secret and value:
-                    value = value.replace(secret, "[REDACTED]")
-            return value
-
         content = replace(
             content,
-            text=redact(content.text),
-            sender_name=redact(content.sender_name),
-            sender_username=redact(content.sender_username),
+            text=self.redact(content.text),
+            sender_name=self.redact(content.sender_name),
+            sender_username=self.redact(content.sender_username),
         )
         edit_timestamp = 0
         if edited:
@@ -300,46 +298,196 @@ class LocalHistoryService:
             for row in reversed(rows)
         )
 
+    def redact(self, value: str | None) -> str | None:
+        for secret in (
+            self.settings.telegram_bot_token,
+            self.settings.openai_api_key,
+            self.settings.telegram_api_hash,
+        ):
+            if secret and value:
+                value = value.replace(secret, "[REDACTED]")
+        return value
+
+    async def _migrate_digest_schema(self) -> None:
+        # Upgrade the original PR schema without resetting existing delivery markers.
+        db = self._db()
+        columns = {
+            row["name"] for row in await db.execute_fetchall("PRAGMA table_info(daily_digests)")
+        }
+        additions = {
+            "attempts": "INTEGER NOT NULL DEFAULT 0",
+            "updated_at": "INTEGER NOT NULL DEFAULT 0",
+            "retry_at": "INTEGER NOT NULL DEFAULT 0",
+            "payload": "TEXT",
+            "part_index": "INTEGER NOT NULL DEFAULT 0",
+            "sent_messages": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                # Column names/types are application constants, never Telegram input.
+                await db.execute(f"ALTER TABLE daily_digests ADD COLUMN {name} {definition}")
+
     async def get_daily_chat_ids(self, start_timestamp: int, end_timestamp: int) -> tuple[int, ...]:
+        if not self.settings.daily_digest_enabled:
+            return ()
         async with self._lock:
             rows = await self._db().execute_fetchall(
                 "SELECT DISTINCT chat_id FROM telegram_messages WHERE timestamp>=? AND timestamp<?",
                 (start_timestamp, end_timestamp),
             )
-        return tuple(row["chat_id"] for row in rows)
+        return tuple(
+            row["chat_id"] for row in rows if self.settings.digest_chat_allowed(row["chat_id"])
+        )
 
     async def get_daily_messages(
         self, chat_id: int, start_timestamp: int, end_timestamp: int
     ) -> tuple[ContextMessage, ...]:
+        if not self.settings.digest_chat_allowed(chat_id):
+            return ()
         async with self._lock:
             rows = await self._db().execute_fetchall(
                 "SELECT * FROM telegram_messages WHERE chat_id=? AND timestamp>=? AND timestamp<? "
                 "ORDER BY message_id",
                 (chat_id, start_timestamp, end_timestamp),
             )
-        return tuple(
-            ContextMessage(
-                message_id=row["message_id"], sender_id=row["sender_id"],
-                sender_name=row["sender_name"], sender_username=row["sender_username"],
-                timestamp=datetime.fromtimestamp(row["timestamp"], UTC), text=row["text"],
-                reply_to_message_id=row["reply_to_message_id"], is_bot=bool(row["is_bot"]),
-                is_current_bot=bool(row["is_our_bot"]),
-            ) for row in rows
-        )
-
-    async def start_daily_digest(self, chat_id: int, digest_date: str) -> bool:
-        async with self._lock:
-            cursor = await self._db().execute(
-                "INSERT OR IGNORE INTO daily_digests(chat_id, digest_date, status) VALUES (?, ?, 'sending')",
-                (chat_id, digest_date),
+        topics = {}
+        messages = []
+        for row in rows:
+            topic = row["message_thread_id"]
+            label = ""
+            if topic is not None:
+                if topic not in topics:
+                    topics[topic] = f"Conversation topic {len(topics) + 1}"
+                label = f"[{topics[topic]}] "
+            messages.append(
+                ContextMessage(
+                    message_id=row["message_id"],
+                    sender_id=row["sender_id"],
+                    sender_name=row["sender_name"],
+                    sender_username=row["sender_username"],
+                    timestamp=datetime.fromtimestamp(row["timestamp"], UTC),
+                    text=label + row["text"],
+                    reply_to_message_id=row["reply_to_message_id"],
+                    is_bot=bool(row["is_bot"]),
+                    is_current_bot=bool(row["is_our_bot"]),
+                )
             )
-            await self._db().commit()
-            return cursor.rowcount == 1
+        return tuple(messages)
 
-    async def complete_daily_digest(self, chat_id: int, digest_date: str, message_id: int) -> None:
+    async def claim_daily_digest(
+        self, chat_id: int, digest_date: str, now: int, *, lease_seconds: int, max_attempts: int
+    ) -> dict | None:
+        if not self.settings.digest_chat_allowed(chat_id):
+            return None
         async with self._lock:
-            await self._db().execute(
-                "UPDATE daily_digests SET status='sent', message_id=? WHERE chat_id=? AND digest_date=?",
-                (message_id, chat_id, digest_date),
-            )
-            await self._db().commit()
+
+            async def claim():
+                db = self._db()
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    await db.execute(
+                        "INSERT OR IGNORE INTO daily_digests(chat_id,digest_date,status) "
+                        "VALUES (?,?,'pending')",
+                        (chat_id, digest_date),
+                    )
+                    rows = await db.execute_fetchall(
+                        "SELECT * FROM daily_digests WHERE chat_id=? AND digest_date=?",
+                        (chat_id, digest_date),
+                    )
+                    row = dict(rows[0])
+                    stale = row["updated_at"] <= now - lease_seconds
+                    if row["status"] == "sending" and stale:
+                        # Lost send acknowledgement cannot safely be retried automatically.
+                        await db.execute(
+                            "UPDATE daily_digests SET status='uncertain',updated_at=? "
+                            "WHERE chat_id=? AND digest_date=?",
+                            (now, chat_id, digest_date),
+                        )
+                        logger.warning(
+                            "Daily digest delivery uncertain chat_id=%d date=%s",
+                            chat_id,
+                            digest_date,
+                        )
+                        await db.commit()
+                        return None
+                    if (
+                        row["status"] in {"sent", "empty", "uncertain"}
+                        or row["attempts"] >= max_attempts
+                        or row["retry_at"] > now
+                        or (row["status"] in {"preparing", "sending", "ready"} and not stale)
+                    ):
+                        await db.commit()
+                        return None
+                    row.update(
+                        status="ready" if row["payload"] else "preparing",
+                        attempts=row["attempts"] + 1,
+                        updated_at=now,
+                    )
+                    await db.execute(
+                        "UPDATE daily_digests SET status=?,attempts=?,updated_at=? "
+                        "WHERE chat_id=? AND digest_date=?",
+                        (row["status"], row["attempts"], now, chat_id, digest_date),
+                    )
+                    await db.commit()
+                    return row
+                except BaseException:
+                    await db.rollback()
+                    raise
+
+            return await self._finish_write(claim())
+
+    async def update_daily_digest(
+        self,
+        chat_id: int,
+        digest_date: str,
+        *,
+        status: str,
+        now: int,
+        retry_at: int = 0,
+        payload: str | None = None,
+        sent_messages: str | None = None,
+        part_index: int | None = None,
+        message_id: int | None = None,
+    ) -> None:
+        if status not in {"ready", "sending", "retry", "sent", "empty", "uncertain"}:
+            raise ValueError("Invalid digest status")
+        async with self._lock:
+
+            async def update():
+                db = self._db()
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    await db.execute(
+                        "UPDATE daily_digests SET status=?,updated_at=?,retry_at=?,"
+                        "payload=COALESCE(?,payload),sent_messages=COALESCE(?,sent_messages),"
+                        "part_index=COALESCE(?,part_index),message_id=COALESCE(?,message_id) "
+                        "WHERE chat_id=? AND digest_date=?",
+                        (
+                            status,
+                            now,
+                            retry_at,
+                            self.redact(payload),
+                            self.redact(sent_messages),
+                            part_index,
+                            message_id,
+                            chat_id,
+                            digest_date,
+                        ),
+                    )
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
+
+            await self._finish_write(update())
+
+    async def prune_daily_digests(self, before_date: str) -> None:
+        async with self._lock:
+
+            async def prune():
+                async with self._db().execute(
+                    "DELETE FROM daily_digests WHERE digest_date<?", (before_date,)
+                ):
+                    pass
+
+            await self._finish_write(prune())

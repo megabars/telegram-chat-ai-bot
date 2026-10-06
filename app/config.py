@@ -2,6 +2,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -38,7 +39,8 @@ class Settings:
     context_command_max_messages: int = 200
     context_max_chars: int = 50000
     context_respect_topics: bool = True
-    daily_digest_enabled: bool = True
+    daily_digest_enabled: bool = False
+    daily_digest_chat_ids: frozenset[int] = frozenset()
     daily_digest_hour: int = 9
     daily_digest_timezone: str = "Asia/Tomsk"
     daily_digest_context_chars: int = 120000
@@ -89,6 +91,23 @@ class Settings:
             )
         if not 0 <= self.daily_digest_hour <= 23:
             raise ConfigurationError("DAILY_DIGEST_HOUR must be between 0 and 23")
+        if self.daily_digest_enabled:
+            if not self.local_history_enabled or not self.daily_digest_chat_ids:
+                raise ConfigurationError(
+                    "Daily digest requires LOCAL_HISTORY_ENABLED and DAILY_DIGEST_CHAT_IDS"
+                )
+            try:
+                ZoneInfo(self.daily_digest_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ConfigurationError("DAILY_DIGEST_TIMEZONE is invalid") from None
+
+    def digest_chat_allowed(self, chat_id: int) -> bool:
+        return (
+            self.daily_digest_enabled
+            and self.local_history_enabled
+            and chat_id in self.daily_digest_chat_ids
+            and (not self.allowed_chat_ids or chat_id in self.allowed_chat_ids)
+        )
 
     @classmethod
     def from_env(cls, env_file: str | Path = ".env") -> "Settings":
@@ -116,6 +135,17 @@ class Settings:
         except ValueError:
             raise ConfigurationError(
                 "ALLOWED_CHAT_IDS must contain comma-separated integers"
+            ) from None
+
+        try:
+            digest_chat_ids = frozenset(
+                int(value.strip())
+                for value in os.getenv("DAILY_DIGEST_CHAT_IDS", "").split(",")
+                if value.strip()
+            )
+        except ValueError:
+            raise ConfigurationError(
+                "DAILY_DIGEST_CHAT_IDS must contain comma-separated integers"
             ) from None
 
         return cls(
@@ -156,7 +186,8 @@ class Settings:
             context_command_max_messages=number("CONTEXT_COMMAND_MAX_MESSAGES", 200),
             context_max_chars=number("CONTEXT_MAX_CHARS", 50000),
             context_respect_topics=boolean("CONTEXT_RESPECT_TOPICS", True),
-            daily_digest_enabled=boolean("DAILY_DIGEST_ENABLED", True),
+            daily_digest_enabled=boolean("DAILY_DIGEST_ENABLED", False),
+            daily_digest_chat_ids=digest_chat_ids,
             daily_digest_hour=number("DAILY_DIGEST_HOUR", 9),
             daily_digest_timezone=os.getenv("DAILY_DIGEST_TIMEZONE", "Asia/Tomsk").strip(),
             daily_digest_context_chars=number("DAILY_DIGEST_CONTEXT_CHARS", 120000),
