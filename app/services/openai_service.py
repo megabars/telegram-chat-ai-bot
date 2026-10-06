@@ -77,6 +77,9 @@ class OpenAIService:
         context: ReplyContext | None = None,
         current_author: str | None = None,
         recent_context: ReplyContext | None = None,
+        request_type: str = "mention",
+        chat_id: int | None = None,
+        message_id: int | None = None,
     ) -> str:
         prompt = prompt.strip()
         if not prompt or len(prompt) > self.settings.max_input_chars:
@@ -116,48 +119,30 @@ class OpenAIService:
             if context.messages:
                 request_input = build_reply_inputs(prompt, context, current_author)
                 instructions += "\n\n" + UNTRUSTED_CONTEXT_INSTRUCTIONS
-        started = monotonic()
-        try:
-            # Includes queue time; no indefinitely waiting prompts in memory.
-            async with asyncio.timeout(self.settings.openai_timeout_seconds):
-                async with self._semaphore:
-                    response = await self.client.responses.create(
-                        model=self.settings.openai_model,
-                        instructions=instructions,
-                        input=request_input,
-                        store=False,
-                        max_output_tokens=self.settings.max_output_tokens,
-                    )
-            answer = response.output_text.strip()
-            if not answer:
-                logger.warning("OpenAI failure kind=empty_output")
-                raise ModelUnavailable from None
-            logger.info("OpenAI response completed duration_ms=%d", (monotonic() - started) * 1000)
-            return answer
-        except asyncio.CancelledError:
-            logger.info("OpenAI request cancelled")
-            raise
-        except RateLimitError:
-            logger.warning("OpenAI failure kind=rate_limit status=429")
-            raise ModelRateLimited from None
-        except (APITimeoutError, TimeoutError):
-            logger.warning("OpenAI failure kind=timeout")
-            raise ModelUnavailable from None
-        except AuthenticationError:
-            logger.error("OpenAI failure kind=authentication status=401")
-            raise ModelUnavailable from None
-        except APIConnectionError:
-            logger.warning("OpenAI failure kind=network")
-            raise ModelUnavailable from None
-        except APIStatusError as exc:
-            logger.error("OpenAI failure kind=status status=%d", exc.status_code)
-            raise ModelUnavailable from None
-        except OpenAIError as exc:
-            logger.error("OpenAI failure kind=%s", type(exc).__name__)
-            raise ModelUnavailable from None
+        return await self._request(
+            request_input,
+            instructions,
+            max_output_tokens=self.settings.max_output_tokens,
+            request_type=request_type,
+            history_messages=len(context.messages)
+            if context is not None
+            else (len(recent_context.messages) if recent_context is not None else 0),
+            history_truncated=bool(
+                (context or recent_context) and (context or recent_context).truncation_reason
+            ),
+            chat_id=chat_id,
+            message_id=message_id,
+        )
 
     async def generate_daily_digest(
-        self, prompt: str, context: ReplyContext, *, context_chars: int, max_output_tokens: int
+        self,
+        prompt: str,
+        context: ReplyContext,
+        *,
+        context_chars: int,
+        max_output_tokens: int,
+        chat_id: int | None = None,
+        digest_date: str | None = None,
     ) -> str:
         """Dedicated bounded path; it cannot alter /context request limits."""
         current_chars = len(render_current_question(prompt, None))
@@ -174,32 +159,166 @@ class OpenAIService:
         request_input = build_reply_inputs(prompt, context, None, limit_marker=RECENT_LIMIT_MARKER)
         if sum(len(item["content"]) for item in request_input) > context_chars:
             raise ValueError("Daily digest input exceeds context budget")
+        return await self._request(
+            request_input,
+            self.instructions + "\n\n" + UNTRUSTED_CONTEXT_INSTRUCTIONS,
+            max_output_tokens=max_output_tokens,
+            request_type="daily_digest",
+            history_messages=len(context.messages),
+            history_truncated=bool(context.truncation_reason),
+            chat_id=chat_id,
+            request_date=digest_date,
+        )
+
+    async def _request(
+        self,
+        request_input: str | list[dict],
+        instructions: str,
+        *,
+        max_output_tokens: int,
+        request_type: str,
+        history_messages: int,
+        history_truncated: bool,
+        chat_id: int | None,
+        message_id: int | None = None,
+        request_date: str | None = None,
+    ) -> str:
+        input_chars = (
+            len(request_input)
+            if isinstance(request_input, str)
+            else sum(len(item["content"]) for item in request_input)
+        )
+        instruction_chars = len(instructions)
+        input_messages = 1 if isinstance(request_input, str) else len(request_input)
+        fields = [
+            f"request_type={request_type}",
+            f"model={self.settings.openai_model}",
+            f"input_chars={input_chars}",
+            f"instructions_chars={instruction_chars}",
+            f"request_chars={input_chars + instruction_chars}",
+            f"input_messages={input_messages}",
+            f"history_messages={history_messages}",
+            f"history_truncated={str(history_truncated).lower()}",
+            f"max_output_tokens={max_output_tokens}",
+            f"timeout_seconds={self.settings.openai_timeout_seconds:g}",
+        ]
+        if chat_id is not None:
+            fields.append(f"chat_id={chat_id}")
+        if message_id is not None:
+            fields.append(f"message_id={message_id}")
+        if request_date is not None:
+            fields.append(f"date={request_date}")
+        metadata = " ".join(fields)
+        queued_at = monotonic()
+        logger.info("OpenAI request queued %s", metadata)
+        sent = False
         try:
+            # The deadline includes semaphore wait, so both timings are useful operationally.
             async with asyncio.timeout(self.settings.openai_timeout_seconds):
                 async with self._semaphore:
+                    api_started = monotonic()
+                    logger.info(
+                        "OpenAI request sent %s queue_wait_ms=%d",
+                        metadata,
+                        (api_started - queued_at) * 1000,
+                    )
+                    sent = True
                     response = await self.client.responses.create(
                         model=self.settings.openai_model,
-                        instructions=self.instructions + "\n\n" + UNTRUSTED_CONTEXT_INSTRUCTIONS,
+                        instructions=instructions,
                         input=request_input,
                         store=False,
                         max_output_tokens=max_output_tokens,
                     )
             answer = response.output_text.strip()
             if not answer:
-                raise ModelUnavailable
+                logger.warning(
+                    "OpenAI request failed %s kind=empty_output api_duration_ms=%d "
+                    "total_duration_ms=%d",
+                    metadata,
+                    (monotonic() - api_started) * 1000,
+                    (monotonic() - queued_at) * 1000,
+                )
+                raise ModelUnavailable from None
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None)
+            total_tokens = getattr(usage, "total_tokens", None)
+            input_details = getattr(usage, "input_tokens_details", None)
+            output_details = getattr(usage, "output_tokens_details", None)
+            logger.info(
+                "OpenAI request completed %s queue_wait_ms=%d api_duration_ms=%d "
+                "total_duration_ms=%d input_tokens=%s output_tokens=%s total_tokens=%s "
+                "cached_input_tokens=%s reasoning_tokens=%s",
+                metadata,
+                (api_started - queued_at) * 1000,
+                (monotonic() - api_started) * 1000,
+                (monotonic() - queued_at) * 1000,
+                input_tokens if input_tokens is not None else "unknown",
+                output_tokens if output_tokens is not None else "unknown",
+                total_tokens if total_tokens is not None else "unknown",
+                getattr(input_details, "cached_tokens", "unknown"),
+                getattr(output_details, "reasoning_tokens", "unknown"),
+            )
             return answer
         except asyncio.CancelledError:
+            logger.info(
+                "OpenAI request cancelled %s stage=%s total_duration_ms=%d",
+                metadata,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
             raise
         except RateLimitError:
+            logger.warning(
+                "OpenAI request failed %s kind=rate_limit status=429 stage=%s total_duration_ms=%d",
+                metadata,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
             raise ModelRateLimited from None
-        except (
-            APITimeoutError,
-            TimeoutError,
-            APIConnectionError,
-            AuthenticationError,
-            APIStatusError,
-            OpenAIError,
-        ):
+        except (APITimeoutError, TimeoutError):
+            logger.warning(
+                "OpenAI request failed %s kind=timeout stage=%s total_duration_ms=%d",
+                metadata,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
+            raise ModelUnavailable from None
+        except AuthenticationError:
+            logger.error(
+                "OpenAI request failed %s kind=authentication status=401 stage=%s "
+                "total_duration_ms=%d",
+                metadata,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
+            raise ModelUnavailable from None
+        except APIConnectionError:
+            logger.warning(
+                "OpenAI request failed %s kind=network stage=%s total_duration_ms=%d",
+                metadata,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
+            raise ModelUnavailable from None
+        except APIStatusError as exc:
+            logger.error(
+                "OpenAI request failed %s kind=status status=%d stage=%s total_duration_ms=%d",
+                metadata,
+                exc.status_code,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
+            raise ModelUnavailable from None
+        except OpenAIError as exc:
+            logger.error(
+                "OpenAI request failed %s kind=%s stage=%s total_duration_ms=%d",
+                metadata,
+                type(exc).__name__,
+                "api" if sent else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
             raise ModelUnavailable from None
 
     async def close(self) -> None:

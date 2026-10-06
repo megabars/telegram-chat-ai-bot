@@ -103,6 +103,30 @@ Telethon, установите `REPLY_CONTEXT_ENABLED=false`. Ограничьт
 ключей. `Ctrl+C` закрывает handlers, SQLite и клиентов. Альтернатива после настройки
 `.env`: `PYTHON_BIN=python3.12 ./install.sh`.
 
+### Логи запросов к модели
+
+Каждый фактический вызов OpenAI отмечается `OpenAI request sent`, после ответа —
+`OpenAI request completed`; перед ожиданием общей очереди пишется `OpenAI request queued`.
+В записях видны тип запроса (`mention`, `reply_chain`, `context_command` или
+`daily_digest`), модель, chat/message/date, число символов и элементов input,
+размер истории, была ли она обрезана, лимит ответа и timeout. Размер показывается
+как для содержимого input, так и для инструкций модели; общий размер складывает
+эти два значения. После ответа также
+пишутся ожидание очереди, длительность вызова и общая длительность. Если API вернул
+usage, журнал показывает input/output/total tokens, cached input tokens и reasoning
+tokens. Поля usage могут быть `unknown`, если провайдер их не вернул. Число символов
+не равно числу токенов и само по себе не является оценкой стоимости. Текст вопроса,
+история, содержимое ответа и API ключи не журналируются.
+
+```bash
+sudo journalctl -u telegram-openai-bot -f | grep --line-buffered 'OpenAI request'
+```
+
+`queued` означает, что запрос подготовлен и ждёт semaphore; `sent` пишется прямо
+перед вызовом OpenAI SDK; `completed` подтверждает успешный ответ. В `failed` указаны
+безопасный тип ошибки и HTTP status, если он доступен. Ручные обращения также имеют
+Telegram chat/message ID для сопоставления с исходным сообщением.
+
 ### Конфигурация
 
 | Переменная | По умолчанию | Назначение |
@@ -542,6 +566,30 @@ to disable Telethon explicitly. Restrict groups through ALLOWED_CHAT_IDS, for ex
 --check-config validates settings without network access; it does not verify keys
 or model access. Ctrl+C closes handlers, SQLite and clients. Alternatively, after
 configuring .env, run `PYTHON_BIN=python3.12 ./install.sh`.
+
+### Model request logs
+
+Each actual OpenAI call writes `OpenAI request sent`; a successful response writes
+`OpenAI request completed`. `OpenAI request queued` appears before waiting for the
+shared semaphore. Records show request type (`mention`, `reply_chain`,
+`context_command` or `daily_digest`), model, chat/message/date, input character and
+item counts, history size and whether it was trimmed, output limit and timeout.
+Sizes are logged for input content and model instructions separately; the total
+request size is their sum.
+Completion also records queue wait, API duration and total duration. When the API
+returns usage, logs show input/output/total tokens, cached input tokens and reasoning
+tokens. Usage fields may be `unknown` if the provider omits them. Character counts
+are not token counts or a cost estimate. Prompts, conversation text, answers and API
+keys are never logged.
+
+```bash
+sudo journalctl -u telegram-openai-bot -f | grep --line-buffered 'OpenAI request'
+```
+
+`queued` means the request is prepared and waiting for the semaphore; `sent` is logged
+immediately before the OpenAI SDK call; `completed` confirms a successful response.
+`failed` logs a safe error type and HTTP status when available. Manual request records
+include Telegram chat/message IDs to match them with the incoming message.
 
 ### Configuration
 

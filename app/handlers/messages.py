@@ -315,14 +315,15 @@ class MessageHandler:
                         context = await self._recent_context(message, bot, command.limit, prompt)
                         if context is None:
                             return
-                        self._log_ai_request(message)
                         answer = await self.service.generate(
                             prompt,
                             recent_context=context,
                             current_author=message.from_user.full_name,
+                            request_type="context_command",
+                            chat_id=message.chat.id,
+                            message_id=message.message_id,
                         )
                     else:
-                        self._log_ai_request(message)
                         context = await self._reply_context(message)
                         answer = None
                     if command is None and context is not None and context.messages:
@@ -330,9 +331,16 @@ class MessageHandler:
                             prompt,
                             context=context,
                             current_author=message.from_user.full_name,
+                            request_type="reply_chain",
+                            chat_id=message.chat.id,
+                            message_id=message.message_id,
                         )
                     elif command is None:
-                        answer = await self.service.generate(prompt)
+                        answer = await self.service.generate(
+                            prompt,
+                            chat_id=message.chat.id,
+                            message_id=message.message_id,
+                        )
             except ModelRateLimited:
                 await self._send(bot, message, MODEL_RATE_LIMIT)
                 return
@@ -347,15 +355,6 @@ class MessageHandler:
             logger.error("Message processing failed kind=%s", type(exc).__name__)
             await self._send(bot, message, TEMPORARY_ERROR)
         # The outer handler tracks all cache writes and AI requests for shutdown.
-
-    @staticmethod
-    def _log_ai_request(message: Message) -> None:
-        logger.info(
-            "OpenAI request chat_id=%d user_id=%d message_id=%d",
-            message.chat.id,
-            message.from_user.id,
-            message.message_id,
-        )
 
     async def _recent_context(
         self, message: Message, bot: Bot, limit: int, prompt: str

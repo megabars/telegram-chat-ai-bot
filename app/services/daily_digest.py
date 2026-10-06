@@ -160,6 +160,8 @@ class DailyDigestService:
                     context,
                     max_output_tokens=self.settings.daily_digest_max_output_tokens,
                     context_chars=self.settings.daily_digest_context_chars,
+                    chat_id=chat_id,
+                    digest_date=day,
                 )
                 header = f"Сводка за {day} — по сохранённой части переписки, не полному архиву.\n\n"
                 payload = self.history.redact(header + answer)
