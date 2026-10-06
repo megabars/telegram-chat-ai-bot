@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import re
 from contextlib import asynccontextmanager, suppress
 
@@ -35,8 +36,91 @@ LOCAL_RATE_LIMIT = "Слишком много запросов. Попробуй
 MODEL_RATE_LIMIT = "Сейчас слишком много запросов. Попробуй чуть позже."
 TEMPORARY_ERROR = "Не удалось получить ответ от модели. Попробуй ещё раз немного позже."
 TELEGRAM_ERRORS = (TelegramAPIError, TelegramNetworkError)
-EPTIL_REPLY = "ептиль бля 🙂"
-EPTIL_PATTERN = re.compile(r"(?<!\w)(?:ептиль|ёптиль)(?!\w)", re.IGNORECASE)
+FUN_REPLIES = {
+    "ептиль": ("Ептиль, бля 🙂", "Ну ептиль 😄", "Ёптиль-моптиль 🤷"),
+    "ёптиль": ("Ептиль, бля 🙂", "Ну ептиль 😄", "Ёптиль-моптиль 🤷"),
+    "сижу": (
+        "Пержу, бля 💨",
+        "Сижу, хуйню не несу 😎",
+        "Пержу, не тужу 😄",
+        "Сижу, бля, как мебель 🪑",
+        "Сижу и медленно охуеваю 😵",
+        "Сижу, пержу, жизнь идёт 💨",
+        "Сижу, никого не трогаю 😌",
+        "Сижу на жопе ровно 🍑",
+        "Сижу, жду пиздеца ⏳",
+        "Сижу, думаю о вечном 🧠",
+        "Сижу, хуйнёй страдаю 🤹",
+        "Сижу, делаю вид, что занят 💻",
+        "Сижу, кайфую, не мешай 😎",
+    ),
+    "прикол": ("За щеку укол, бля 😄", "Прикол уровня «ну ё-моё» 🤦", "Нихуя себе шутка 🎭"),
+    "почему": ("По кочану, бля 🥬", "Потому что гладиолус, ёпта 🌷", "Хуй знает, так вышло 🤷"),
+    "кто": ("Конь в пальто, ёпта 🐴", "Дед Пихто, бля 🧓", "Хуй его знает 🤔"),
+    "что": ("Через плечо, бля 🙃", "Нихуя, но интересно 🧐", "Секрет фирмы, ёпта 🤫"),
+    "где": ("В пизде, где ж ещё? 🗺️", "В Караганде, бля 🏭", "Там, где нас нет 🌌"),
+    "когда": (
+        "Когда рак на горе свистнет, бля 🦞",
+        "Когда-нибудь, хуй знает когда ⏳",
+        "После дождичка в четверг 🌧️",
+    ),
+    "зачем": ("Затем, бля 😌", "Чтобы было дохуя красиво ✨", "Для науки, ёпта 🔬"),
+    "можно": (
+        "Можно, но пиздец осторожно ⚠️",
+        "Можно, хули нет 🙂",
+        "Можно всё, но не всё сразу 🤷",
+    ),
+    "спасибо": ("В карман не положишь, но заебись 🤝", "Пожалуйста, бля 😌", "Обращайся, ёпта 🫡"),
+    "привет": ("Привет, ёпта 👋", "Салют, бля ✨", "Здорово, корова 🐮"),
+    "алло": ("Алло, бля, приём 📞", "На связи, ёпта 📡", "Громче, нихуя не слышно 🎧"),
+    "погнали": ("Погнали, ёпта 🚀", "Полный вперёд, бля 🚲", "Газ в пол 🔥"),
+    "ладно": ("Ладно, хрен с ним 🤝", "Похуй, живём 😎", "Принято, бля 🫡"),
+    "норм": (
+        "Норм, не пиздец 😎",
+        "Живём, бля 💪",
+        "Уже заебись 👍",
+        "Норм, бля, прорвёмся 💪",
+        "Норм, пока не горим 🔥",
+        "Норм, но можно и лучше 😏",
+        "Норм, ебать, уже победа 🏆",
+        "Норм, плюс-минус живой 🧟",
+        "Норм, пойдёт на хлеб 🍞",
+        "Норм, не жалуемся 😌",
+        "Норм, но душа просит отпуск 🏖️",
+        "Норм, лишь бы не хуже 🤞",
+        "Норм, как после трёх энергетиков ⚡",
+    ),
+    "жесть": ("Жесть, аж пиздец 🫠", "Вот это разнос 🔥", "Моё почтение 😵"),
+    "капец": ("Капец, но держимся 💪", "Ну всё, приплыли 🛟", "Пиздецометр зашкалил 📈"),
+    "ахуеть": ("Ахуеть, но не встать 😵", "Вот это поворот, бля 🎢", "Слов нет, одни эмоции 🤯"),
+    "чекаво": (
+        "Да пиздец, но держимся 💪",
+        "Живём, бля, не жалуемся 😎",
+        "Всё по классике: работа-дом-охуевание 🏠",
+        "Нормально, но хочется денег 💸",
+        "Да так, космический бардак 🌌",
+        "Потихоньку, без резких движений 🐢",
+        "В режиме «не трогайте меня» 😴",
+        "Всё заебись, пока не спрашиваешь 😄",
+        "Да чё, жизнь происходит 🎢",
+        "На минималках, но стабильно 🔋",
+    ),
+    "чё каво": (
+        "Да пиздец, но держимся 💪",
+        "Живём, бля, не жалуемся 😎",
+        "Всё по классике: работа-дом-охуевание 🏠",
+    ),
+    "че каво": (
+        "Да пиздец, но держимся 💪",
+        "Живём, бля, не жалуемся 😎",
+        "Всё по классике: работа-дом-охуевание 🏠",
+    ),
+}
+FUN_TRIGGER_PATTERN = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(re.escape(key) for key in sorted(FUN_REPLIES, key=len, reverse=True))
+    + r")(?!\w)"
+)
 
 
 @asynccontextmanager
@@ -83,6 +167,8 @@ class MessageHandler:
         self.local_history = local_history
         self._active: set[asyncio.Task] = set()
         self._stopping = False
+        self._fun_reply_order: dict[str, list[str]] = {}
+        self._fun_reply_last: dict[str, str] = {}
 
     def router(self) -> Router:
         router = Router(name="mention_only")
@@ -99,8 +185,9 @@ class MessageHandler:
         try:
             args = context_command_args(message, self.bot_username)
             await self._store(message)
-            if self._is_eptil_message(message):
-                await self._send(bot, message, EPTIL_REPLY)
+            fun_reply = self._fun_reply(message)
+            if fun_reply is not None:
+                await self._send(bot, message, fun_reply)
                 return
             await self._handle_ai(message, bot, args)
         except asyncio.CancelledError:
@@ -120,15 +207,34 @@ class MessageHandler:
             return False
         return True
 
-    @staticmethod
-    def _is_eptil_message(message: Message) -> bool:
-        return bool(
-            message.text
-            and message.from_user
-            and not message.from_user.is_bot
-            and message.sender_chat is None
-            and EPTIL_PATTERN.search(message.text)
-        )
+    def _fun_reply(self, message: Message) -> str | None:
+        if (
+            not message.text
+            or not message.from_user
+            or message.from_user.is_bot
+            or message.sender_chat
+        ):
+            return None
+        # Commands and mentions keep their existing routing, validation and rate limits.
+        if any(
+            entity.type in {"bot_command", "mention", "text_mention"}
+            for entity in message.entities or ()
+        ):
+            return None
+        match = FUN_TRIGGER_PATTERN.search(message.text.casefold())
+        if match is None:
+            return None
+        trigger = match.group()
+        replies = FUN_REPLIES[trigger]
+        queue = self._fun_reply_order.setdefault(trigger, [])
+        if not queue:
+            queue.extend(replies)
+            random.shuffle(queue)
+            if len(queue) > 1 and queue[-1] == self._fun_reply_last.get(trigger):
+                queue[-1], queue[-2] = queue[-2], queue[-1]
+        reply = queue.pop()
+        self._fun_reply_last[trigger] = reply
+        return reply
 
     async def _store(self, message: Message, *, edited: bool = False) -> None:
         if self.local_history is None or not self.settings.local_history_enabled:

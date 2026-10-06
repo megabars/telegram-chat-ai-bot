@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context and a local SQLite rolling cache. Application version: **1.2.0**.
+context and a local SQLite rolling cache. Application version: **1.3.0**.
 
 [Русский](#russian) · [English](#english)
 
@@ -56,6 +56,18 @@ Python 3.12; системного Python 3.10 из Ubuntu 22.04 недостат
    пропускается. Если заполнено только одно значение, конфигурация невалидна.
 
 Не отправляйте ключи или `.env` в Telegram и не включайте их в Git.
+
+### Локальные вариативные ответы
+
+Версия 1.3.0 добавляет готовые реакции на отдельные слова и фразы, например
+«ептиль», «ёптиль», «сижу», «привет», «норм» и «чекаво». Они содержат ненормативную
+лексику, отправляются без OpenAI и сохраняются как ответы нашего бота в cache.
+Проверка не зависит от регистра и не совпадает с частью слова. Для каждого trigger
+варианты перемешиваются и расходуются без повторов до завершения цикла; соседние
+циклы не дают одинаковый ответ подряд. Порядок общий для всех чатов и сбрасывается
+при restart. Сообщения с Telegram entity mention/text_mention/bot_command
+пропускают эти реакции: явные обращения к AI и команды сохраняют свои проверки,
+rate limiter и контекст. Edits, боты и анонимные отправители не запускают реакции.
 
 ### Локальная настройка и запуск
 
@@ -341,7 +353,7 @@ Telegram handlers не больше concurrency×4, общий AI timeout вкл
 bash -n install.sh
 ```
 
-**233 офлайн-теста** проходят на Python 3.12/macOS и Ubuntu; сеть в тестах блокируется,
+**245 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
 SQLite — только temporary databases. Есть проверки 100 обычных updates → 0 AI/fetch,
 /context → 1 AI, snapshot, topics, roles/injection, edits, outgoing messages,
 5100→5000 cleanup per chat, concurrency, lifecycle, deadlines, UTF-16 и безопасных
@@ -426,6 +438,18 @@ MTProto TCP to Telegram data centers. Run exactly one polling process per bot to
    work without enrichment; providing only one is a configuration error.
 
 Never send keys or .env to Telegram or commit them to Git.
+
+### Local rotating replies
+
+Version 1.3.0 adds predefined reactions to Russian words and phrases, including
+«ептиль», «ёптиль», «сижу», «привет», «норм» and «чекаво». These replies contain
+profanity, never call OpenAI and are cached as outgoing bot messages. Matching is
+case-insensitive and respects word boundaries. Each trigger uses a shuffled cycle
+without repeats until exhausted; consecutive cycles avoid repeating the previous
+reply. Rotation is shared across chats and resets on restart. Messages containing
+mention/text_mention/bot_command Telegram entities bypass these reactions, preserving
+explicit AI routing, validation, rate limits and context. Edits, bots and anonymous
+senders do not trigger reactions.
 
 ### Local setup and startup
 
@@ -704,7 +728,7 @@ does not guarantee zero charges if the provider has started processing it.
 bash -n install.sh
 ```
 
-**233 offline tests** pass on Python 3.12/macOS and Ubuntu. Tests block network
+**245 offline tests** pass on Python 3.12. Tests block network
 access and use temporary SQLite databases only. Coverage includes 100 ordinary
 updates → 0 AI/fetch, /context → 1 AI, snapshots, topics, roles/injection, edits,
 outgoing messages, per-chat 5100→5000 cleanup, concurrency, lifecycle, deadlines,

@@ -69,13 +69,19 @@ async def test_100_ordinary_messages_cost_zero_then_exact_50_snapshot(
     assert len(await rows(local_history)) == 102  # 100 received + command + outgoing.
 
 
-async def test_one_ordinary_message_is_local_only(cache_handler, local_history, sdk, telegram):
+@pytest.mark.parametrize("text,expected_rows", [("Всем здравия", 1), ("Всем привет", 2)])
+async def test_one_ordinary_message_is_local_only(
+    cache_handler, local_history, sdk, telegram, text, expected_rows
+):
     cache_handler.history = AsyncMock()
-    await cache_handler.handle(make_message("Всем привет", entities=False), telegram)
-    assert len(await rows(local_history)) == 1
+    await cache_handler.handle(make_message(text, entities=False), telegram)
+    assert len(await rows(local_history)) == expected_rows
     sdk.responses.create.assert_not_awaited()
     cache_handler.history.get_reply_chain.assert_not_awaited()
-    telegram.send_message.assert_not_awaited()
+    if expected_rows == 1:
+        telegram.send_message.assert_not_awaited()
+    else:
+        assert (await rows(local_history))[-1]["is_our_bot"] == 1
 
 
 async def test_messages_after_command_and_edits_while_model_waits_do_not_enter_input(
@@ -111,6 +117,7 @@ async def test_messages_after_command_and_edits_while_model_waits_do_not_enter_i
         ("/context подведи итог", "подведи итог"),
         ("/context@MY_BOT 50 вопрос пользователя", "вопрос пользователя"),
         ("/context\n50\tподведи итог", "подведи итог"),
+        ("/context 50 что обсуждалось?", "что обсуждалось?"),
     ],
 )
 async def test_defaults_and_addressed_command(
