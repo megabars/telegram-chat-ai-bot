@@ -227,6 +227,105 @@ class OpenAIService:
             image_bytes=len(image),
         )
 
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        images: list[bytes] | None,
+        chat_id: int,
+        message_id: int,
+    ) -> bytes:
+        prompt = prompt.strip()
+        if not prompt or len(prompt) > self.settings.max_input_chars:
+            raise ValueError("Image prompt must be nonempty and within MAX_INPUT_CHARS")
+        if images is not None and (not 1 <= len(images) <= 4 or any(not image for image in images)):
+            raise ValueError("Image edit requires 1 to 4 nonempty source images")
+        request_type = "image_edit" if images else "image_generation"
+        metadata = (
+            f"request_type={request_type} model={self.settings.image_generation_model} "
+            f"input_chars={len(prompt)} input_images={len(images or ())} "
+            f"input_image_bytes={sum(map(len, images or ()))} output_size=1024x1024 "
+            f"quality=low timeout_seconds={self.settings.image_generation_timeout_seconds:g} "
+            f"chat_id={chat_id} message_id={message_id}"
+        )
+        queued_at = monotonic()
+        logger.info("OpenAI request queued %s", metadata)
+        try:
+            async with asyncio.timeout(self.settings.image_generation_timeout_seconds):
+                async with self._semaphore:
+                    api_started = monotonic()
+                    logger.info(
+                        "OpenAI request sent %s queue_wait_ms=%d",
+                        metadata,
+                        (api_started - queued_at) * 1000,
+                    )
+                    kwargs = dict(
+                        model=self.settings.image_generation_model,
+                        prompt=prompt,
+                        n=1,
+                        size="1024x1024",
+                        quality="low",
+                        output_format="jpeg",
+                        output_compression=80,
+                    )
+                    if images is None:
+                        response = await self.client.images.generate(**kwargs)
+                    else:
+                        response = await self.client.images.edit(
+                            image=[
+                                (f"source-{index}.jpg", image, "image/jpeg")
+                                for index, image in enumerate(images)
+                            ],
+                            **kwargs,
+                        )
+            encoded = response.data[0].b64_json if response.data else None
+            if not encoded:
+                raise ModelUnavailable
+            try:
+                result = base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error):
+                raise ModelUnavailable from None
+            if not result.startswith(b"\xff\xd8\xff"):
+                raise ModelUnavailable
+            usage = getattr(response, "usage", None)
+            logger.info(
+                "OpenAI request completed %s queue_wait_ms=%d api_duration_ms=%d "
+                "total_duration_ms=%d output_bytes=%d input_tokens=%s "
+                "output_tokens=%s total_tokens=%s",
+                metadata,
+                (api_started - queued_at) * 1000,
+                (monotonic() - api_started) * 1000,
+                (monotonic() - queued_at) * 1000,
+                len(result),
+                getattr(usage, "input_tokens", "unknown"),
+                getattr(usage, "output_tokens", "unknown"),
+                getattr(usage, "total_tokens", "unknown"),
+            )
+            return result
+        except asyncio.CancelledError:
+            logger.info("OpenAI request cancelled %s", metadata)
+            raise
+        except RateLimitError:
+            logger.warning("OpenAI request failed %s kind=rate_limit", metadata)
+            raise ModelRateLimited from None
+        except (APITimeoutError, TimeoutError):
+            logger.warning("OpenAI request failed %s kind=timeout", metadata)
+            raise ModelUnavailable from None
+        except AuthenticationError:
+            logger.error("OpenAI request failed %s kind=authentication", metadata)
+            raise ModelUnavailable from None
+        except APIConnectionError:
+            logger.warning("OpenAI request failed %s kind=network", metadata)
+            raise ModelUnavailable from None
+        except APIStatusError as exc:
+            logger.error(
+                "OpenAI request failed %s kind=status status=%d", metadata, exc.status_code
+            )
+            raise ModelUnavailable from None
+        except OpenAIError as exc:
+            logger.error("OpenAI request failed %s kind=%s", metadata, type(exc).__name__)
+            raise ModelUnavailable from None
+
     async def _request(
         self,
         request_input: str | list[dict],

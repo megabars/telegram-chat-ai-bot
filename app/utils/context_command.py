@@ -22,18 +22,26 @@ class ContextCommand:
 
 
 def context_command_args(message: Message, bot_username: str) -> str | None:
-    if not message.text:
+    return command_args(message, bot_username, "/context")
+
+
+def command_args(
+    message: Message, bot_username: str, command_name: str, *, caption: bool = False
+) -> str | None:
+    content = message.caption if caption else message.text
+    entities = message.caption_entities if caption else message.entities
+    if not content:
         return None
-    for entity in message.entities or ():
+    for entity in entities or ():
         if entity.type != "bot_command" or entity.offset != 0:
             continue
-        command = message.text.encode("utf-16-le")[: entity.length * 2].decode("utf-16-le")
+        command = content.encode("utf-16-le")[: entity.length * 2].decode("utf-16-le")
         name, _, username = command.partition("@")
-        if name.lower() != "/context":
+        if name.lower() != command_name:
             return None
         if username and username.casefold() != bot_username.casefold():
             return None
-        return message.text[len(command) :].strip()
+        return content[len(command) :].strip()
     return None
 
 

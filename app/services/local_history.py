@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS photo_analysis_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_analysis_requests_daily
 ON photo_analysis_requests(day, chat_id, user_id);
+CREATE TABLE IF NOT EXISTS image_generation_requests (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_image_generation_requests_daily
+ON image_generation_requests(day, chat_id, user_id);
 """
 INSERT = """INSERT OR IGNORE INTO telegram_messages (
     chat_id, message_id, message_thread_id, sender_id, sender_name, sender_username,
@@ -331,6 +341,37 @@ class LocalHistoryService:
         """Reserve one model attempt atomically; a failed API attempt still uses the quota."""
         if not self.settings.photo_analysis_enabled or not self._allowed(chat_id):
             return "forbidden"
+        return await self._claim_daily_request(
+            "photo_analysis_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
+        )
+
+    async def claim_image_request(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        day: str,
+        *,
+        user_limit: int,
+        chat_limit: int,
+    ) -> str:
+        if not self.settings.image_generation_enabled or not self._allowed(chat_id):
+            return "forbidden"
+        return await self._claim_daily_request(
+            "image_generation_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
+        )
+
+    async def _claim_daily_request(
+        self,
+        table: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        day: str,
+        user_limit: int,
+        chat_limit: int,
+    ) -> str:
+        # Table is selected only by the two constant wrapper methods above.
         before = (date.fromisoformat(day) - timedelta(days=30)).isoformat()
         async with self._lock:
 
@@ -338,9 +379,9 @@ class LocalHistoryService:
                 db = self._db()
                 try:
                     await db.execute("BEGIN IMMEDIATE")
-                    await db.execute("DELETE FROM photo_analysis_requests WHERE day<?", (before,))
+                    await db.execute(f"DELETE FROM {table} WHERE day<?", (before,))
                     existing = await db.execute_fetchall(
-                        "SELECT 1 FROM photo_analysis_requests WHERE chat_id=? AND message_id=?",
+                        f"SELECT 1 FROM {table} WHERE chat_id=? AND message_id=?",
                         (chat_id, message_id),
                     )
                     if existing:
@@ -349,7 +390,7 @@ class LocalHistoryService:
                         counts = await db.execute_fetchall(
                             "SELECT COUNT(*) AS chat_count, "
                             "COUNT(*) FILTER (WHERE user_id=?) AS user_count "
-                            "FROM photo_analysis_requests WHERE day=? AND chat_id=?",
+                            f"FROM {table} WHERE day=? AND chat_id=?",
                             (user_id, day, chat_id),
                         )
                         count = counts[0]
@@ -359,7 +400,7 @@ class LocalHistoryService:
                             result = "chat_limit"
                         else:
                             await db.execute(
-                                "INSERT INTO photo_analysis_requests "
+                                f"INSERT INTO {table} "
                                 "(chat_id,message_id,user_id,day,created_at) VALUES (?,?,?,?,?)",
                                 (
                                     chat_id,

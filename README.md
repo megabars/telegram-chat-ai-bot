@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context and a local SQLite rolling cache. Application version: **1.4.0**.
+context and a local SQLite rolling cache. Application version: **1.5.0**.
 
 [Русский](#russian) · [English](#english)
 
@@ -21,6 +21,9 @@ Telethon и aiosqlite. Работает через long polling, без вход
   chat/topic из локального SQLite, строго до ID команды.
 - При `PHOTO_ANALYSIS_ENABLED=true`: фото с подписью `@username_бота что на фото?`
   или reply на фото с таким вопросом — модель получает снимок и вопрос.
+- При `IMAGE_GENERATION_ENABLED=true`: `/image описание` создаёт изображение,
+  `/edit описание` меняет одно фото, а `/mix описание` в подписи альбома из
+  2–4 фото объединяет их по инструкции.
 
 Обычные сообщения сохраняются **только локально**: Telegram → Ubuntu → SQLite.
 Они не вызывают OpenAI, embeddings, moderation или Telethon fetch при получении.
@@ -94,6 +97,31 @@ SQLite хранит только текст подписи либо `[photo]`, �
 от обычного ограничения запросов в минуту. Анализ изображения расходует входные
 токены OpenAI; успешные запросы показывают фактический usage в журнале.
 
+### Генерация и редактирование изображений
+
+По умолчанию выключены. Установите `IMAGE_GENERATION_ENABLED=true` и оставьте
+`LOCAL_HISTORY_ENABLED=true`. В разрешённой группе отправьте `/image рыжий кот
+на велосипеде` — бот создаст одно изображение и ответит фото. Для изменения
+существующего снимка отправьте его с подписью `/edit замени фон на осенний парк`
+или ответьте этой командой на уже отправленное фото. Для объединения
+отправьте **одним альбомом 2–4 фото** с подписью `/mix объедини эти снимки в один
+коллаж`. Telegram передаёт альбом отдельными сообщениями; бот собирает их по
+`media_group_id` в течение двух секунд и проверяет отправителя, чат и тему.
+Альтернативный вариант для двух фото: отправить первое, затем ответить на него
+вторым фото с подписью `/mix объедини эти снимки`. Команды другого бота не
+выполняются; обычные фото и сообщения генерацию не запускают.
+
+Генерация использует OpenAI Image API: модель `gpt-image-2.5-flare` по умолчанию,
+качество `low`, размер `1024x1024`, JPEG, один результат на запрос. Эти параметры
+ограничивают расход; модель задаётся через `IMAGE_GENERATION_MODEL`. При `/mix`
+исходные фото размером до 10 МиБ каждое скачиваются только после проверок и не
+сохраняются в SQLite. Полученное изображение публикуется в исходной теме.
+Счётчики генерации, редактирования и объединения общие и независимы от анализа фото: **3 попытки
+на пользователя и 10 на чат за сутки** по `Asia/Tomsk`. Они сохраняются при
+перезапуске; ошибка Image API после отправки запроса расходует попытку, а ошибка
+проверки альбома или загрузки фото — нет. Изображения и текст описания не пишутся
+в журнал; видны тип запроса, размеры, длительность и usage, если его вернул API.
+
 ### Локальная настройка и запуск
 
 ```bash
@@ -131,7 +159,8 @@ Telethon, установите `REPLY_CONTEXT_ENABLED=false`. Ограничьт
 Каждый фактический вызов OpenAI отмечается `OpenAI request sent`, после ответа —
 `OpenAI request completed`; перед ожиданием общей очереди пишется `OpenAI request queued`.
 В записях видны тип запроса (`mention`, `reply_chain`, `context_command`,
-`photo_question` или `daily_digest`), модель, chat/message/date, число символов и элементов input,
+`photo_question`, `image_generation`, `image_edit` или `daily_digest`), модель,
+chat/message/date, число символов и элементов input,
 размер истории, была ли она обрезана, лимит ответа и timeout. Размер показывается
 как для содержимого input, так и для инструкций модели; общий размер складывает
 эти два значения. Для фото отдельно записывается размер изображения в байтах;
@@ -191,6 +220,12 @@ Telegram chat/message ID для сопоставления с исходным �
 | `PHOTO_DAILY_USER_LIMIT` | `20` | Максимум попыток анализа фото на пользователя за сутки |
 | `PHOTO_DAILY_CHAT_LIMIT` | `20` | Максимум попыток анализа фото на чат за сутки |
 | `PHOTO_DAILY_TIMEZONE` | `Asia/Tomsk` | Временная зона календарного дня для лимитов фото |
+| `IMAGE_GENERATION_ENABLED` | `false` | Разрешить `/image`, `/edit` и `/mix` |
+| `IMAGE_GENERATION_MODEL` | `gpt-image-2.5-flare` | Модель OpenAI Image API |
+| `IMAGE_GENERATION_TIMEOUT_SECONDS` | `180` | Общий таймаут генерации с ожиданием очереди |
+| `IMAGE_DAILY_USER_LIMIT` | `3` | Попыток `/image`, `/edit` и `/mix` на пользователя за сутки |
+| `IMAGE_DAILY_CHAT_LIMIT` | `10` | Попыток `/image`, `/edit` и `/mix` на весь чат за сутки |
+| `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Временная зона календарного дня для генерации |
 
 Boolean values — только `true`/`false`, числовые лимиты положительны, таймауты конечны.
 Cleanup threshold должен быть больше max messages; default N не больше max N.
@@ -512,6 +547,9 @@ HTTP port. The model is invoked through three text interactions:
   from the local SQLite cache for the current chat/topic, strictly before the command ID.
 - With `PHOTO_ANALYSIS_ENABLED=true`, a photo captioned `@bot_username what is in this photo?`
   or a reply to a photo with that question sends the photo and question for analysis.
+- With `IMAGE_GENERATION_ENABLED=true`, `/image description` creates one image;
+  `/edit description` changes one photo, and `/mix description` in a 2–4 photo
+  album caption combines the sources.
 
 Ordinary messages are stored **locally only**: Telegram → server → SQLite. They
 never trigger OpenAI, embeddings, moderation or Telethon fetch on receipt. Optional
@@ -583,6 +621,30 @@ slot; failed downloads do not. Old quota rows are pruned after 30 days on a late
 request. The existing per-minute limiter also applies. Image analysis uses OpenAI
 input tokens; successful request logs include actual token usage.
 
+### Image generation and editing
+
+Disabled by default. Set `IMAGE_GENERATION_ENABLED=true` and keep
+`LOCAL_HISTORY_ENABLED=true`. In an allowed group, send `/image a red cat riding
+a bicycle` to receive one generated image. To edit an existing photo, send it
+with `/edit replace the background with an autumn park` as its caption, or reply
+to an existing photo with that command. To combine images, send **one album of
+2–4 photos** with `/mix combine these into one scene` in its caption. Telegram
+delivers album items as separate updates; the bot collects them by `media_group_id`
+for two seconds and checks the sender, chat and topic. For two photos, you can
+also reply to the first photo with a second photo captioned `/mix combine them`.
+Commands addressed to another bot are ignored; ordinary photos never trigger
+generation.
+
+The OpenAI Image API uses `gpt-image-2.5-flare` by default, low quality,
+`1024x1024`, JPEG output and one result per call. `IMAGE_GENERATION_MODEL` can
+change the model. Each `/mix` source is limited to 10 MiB and is downloaded only
+after validation. Image bytes are not stored in SQLite. The result is posted
+in the same topic. Generation, editing and mixing share separate persisted daily quotas:
+**3 attempts per user and 10 per chat** in `Asia/Tomsk`. These quotas are
+independent of photo analysis. Failed Image API attempts consume a slot; invalid
+albums and failed downloads do not. Prompts and images are excluded from logs;
+request type, byte counts, duration and available API usage are logged.
+
 ### Local setup and startup
 
 ```bash
@@ -620,7 +682,8 @@ configuring .env, run `PYTHON_BIN=python3.12 ./install.sh`.
 Each actual OpenAI call writes `OpenAI request sent`; a successful response writes
 `OpenAI request completed`. `OpenAI request queued` appears before waiting for the
 shared semaphore. Records show request type (`mention`, `reply_chain`, `context_command`,
-`photo_question` or `daily_digest`), model, chat/message/date, input character and
+`photo_question`, `image_generation`, `image_edit` or `daily_digest`), model,
+chat/message/date, input character and
 item counts, history size and whether it was trimmed, output limit and timeout.
 Sizes are logged for input content and model instructions separately; the total
 request size is their sum. Photo requests also log image byte size; base64 content
@@ -680,6 +743,12 @@ include Telegram chat/message IDs to match them with the incoming message.
 | `PHOTO_DAILY_USER_LIMIT` | `20` | Photo model attempts per user per calendar day |
 | `PHOTO_DAILY_CHAT_LIMIT` | `20` | Photo model attempts per chat per calendar day |
 | `PHOTO_DAILY_TIMEZONE` | `Asia/Tomsk` | Timezone used for photo quota calendar days |
+| `IMAGE_GENERATION_ENABLED` | `false` | Enable `/image`, `/edit` and `/mix` |
+| `IMAGE_GENERATION_MODEL` | `gpt-image-2.5-flare` | OpenAI Image API model |
+| `IMAGE_GENERATION_TIMEOUT_SECONDS` | `180` | Generation deadline including queue wait |
+| `IMAGE_DAILY_USER_LIMIT` | `3` | `/image`, `/edit` and `/mix` attempts per user per day |
+| `IMAGE_DAILY_CHAT_LIMIT` | `10` | `/image`, `/edit` and `/mix` attempts per chat per day |
+| `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Timezone for generation quota calendar days |
 
 Booleans accept only true/false; numeric limits must be positive and timeouts finite.
 Cleanup threshold must exceed max messages; default N cannot exceed maximum N.
