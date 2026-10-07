@@ -267,6 +267,7 @@ class OpenAIService:
                         quality="low",
                         output_format="jpeg",
                         output_compression=80,
+                        timeout=self.settings.image_generation_timeout_seconds,
                     )
                     if images is None:
                         response = await self.client.images.generate(**kwargs)

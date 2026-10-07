@@ -72,6 +72,7 @@ async def test_image_command_is_explicit_and_sends_one_photo(image_handler, sdk,
     assert kwargs["n"] == 1
     assert kwargs["quality"] == "low"
     assert kwargs["size"] == "1024x1024"
+    assert kwargs["timeout"] == image_handler.settings.image_generation_timeout_seconds
     assert kwargs["prompt"] == "рыжий кот"
     assert telegram.send_photo.await_count == 1
     assert telegram.send_photo.call_args.kwargs["reply_parameters"].message_id == 7
