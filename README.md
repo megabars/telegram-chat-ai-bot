@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context and a local SQLite rolling cache. Application version: **1.5.0**.
+context and a local SQLite rolling cache. Application version: **1.5.2**.
 
 [Русский](#russian) · [English](#english)
 
@@ -35,7 +35,8 @@ human user ID: сообщения других ботов, подписи без
 service events и edits сами по себе не вызывают модель.
 
 Username/ID получаются через getMe; mention и command проверяются по Telegram
-entities с учётом UTF-16. Reply без нового mention не вызывает AI. Ответы — plain
+entities с учётом UTF-16. Reply без нового mention вызывает AI, если ответили
+на собственное сообщение бота. Ответы — plain
 text в исходном чате/теме, первая часть — reply. Длинные ответы разбиваются до
 4096 UTF-16 units, preview ссылок выключен, во время запроса показывается typing.
 Модель отвечает на языке пользователя; локальные служебные ответы — на русском.
@@ -344,7 +345,12 @@ SQLite хранит результат генерации, число попыт
 
 ### Контекст цепочки ответов
 
-Только reply с новым mention запускает выбор конкретных ancestors. Telethon
+Reply с новым mention и reply на собственное сообщение бота запускают выбор
+конкретных ancestors. Ответ на прямой ответ бота можно отправлять без mention;
+текст такого ответа становится новым вопросом, а переписка от исходного сообщения
+до ответа бота передаётся модели как контекст. Если MTProto недоступен, бот всё
+равно передаёт модели доступное прямое сообщение бота с marker неполной истории.
+Ответы другим ботам сами по себе AI не запускают. Telethon
 создаётся один раз, работает RPC-only (`receive_updates=False`, `catch_up=False`),
 без getHistory, userbot и второго listener. Используются getMessages по IDs;
 peer resolution может дополнительно запрашивать metadata access hash.
@@ -354,7 +360,8 @@ Topic/chat boundaries, циклы, удалённые parents, timeout и FloodW
 обход; доступная часть используется с marker недоступности. Если контекста нет,
 модель получает только вопрос. Ближайшие ancestors имеют приоритет при 30000-char
 budget. Отдельный marker: `[Earlier messages omitted due to context limit]`.
-Reply без mention не запускает fetch. Recent cache сюда автоматически не добавляется.
+Обычный reply без mention по-прежнему не запускает fetch. Recent cache сюда
+автоматически не добавляется.
 
 ### Установка на Ubuntu через systemd
 
@@ -561,7 +568,8 @@ identifiable human user; other bots, captions without a mention, anonymous sende
 service events and edits cannot initiate a model call.
 
 Bot username/ID come from getMe. Mentions and commands use Telegram entities with
-UTF-16 offsets. A reply without a fresh mention does not invoke AI. Answers are
+UTF-16 offsets. A reply without a fresh mention invokes AI when it replies to
+this bot's own message. Answers are
 plain text in the original chat/topic, with the first part replying to the request.
 Long answers are split at 4096 UTF-16 units; link previews are off and typing is
 shown while processing. Model answers follow the user's language; local status
@@ -866,7 +874,12 @@ one instance per bot token.
 
 ### Reply-chain context
 
-Only a reply with a fresh mention fetches exact ancestor messages. A singleton
+Replies with a fresh mention and replies to this bot's own messages fetch exact
+ancestor messages. Users can continue a direct bot answer without mentioning the
+bot again; the reply text becomes the next question, and the chain from the
+original message through the bot answer is included as context. If MTProto is
+unavailable, the direct bot message is still included with a partial-history
+marker. Replies to other bots do not trigger AI. A singleton
 Telethon client runs RPC-only with receive_updates=False and catch_up=False;
 there is no getHistory, userbot or second listener. Fetches use exact message IDs;
 peer resolution may also request access-hash metadata. The session must belong
@@ -876,7 +889,8 @@ Chat/topic boundaries, cycles, deleted parents, timeout and FloodWait end traver
 the available portion is used with an unavailable-history marker. With no context,
 only the question is sent. Closest ancestors take priority within the 30000-character
 budget, with `[Earlier messages omitted due to context limit]` when truncated.
-A reply without mention triggers no fetch. Recent cached messages are not added.
+An ordinary reply without a mention still triggers no fetch. Recent cached
+messages are not added.
 
 ### Ubuntu installation with systemd
 

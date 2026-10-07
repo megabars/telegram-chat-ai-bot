@@ -23,7 +23,7 @@ from app.utils.context_command import (
     context_command_args,
     parse_context_command,
 )
-from app.utils.local_message import UnknownTopic, forum_topic_id
+from app.utils.local_message import UnknownTopic, forum_topic_id, local_message_content
 from app.utils.mentions import extract_prompt
 from app.utils.rate_limit import RateLimiter
 from app.utils.reply_context import (
@@ -222,7 +222,7 @@ class MessageHandler:
                 await self._handle_image(message, bot, image_args, mix_args, edit_args)
                 return
             fun_reply = self._fun_reply(message)
-            if fun_reply is not None:
+            if fun_reply is not None and not self._is_direct_reply_to_bot(message):
                 await self._send(bot, message, fun_reply)
                 return
             await self._handle_ai(message, bot, args)
@@ -317,7 +317,11 @@ class MessageHandler:
             except ContextCommandError as exc:
                 await self._send(bot, message, str(exc))
                 return
-        prompt = command.prompt if command else extract_prompt(content, entities, self.bot_username)
+        mentioned_prompt = extract_prompt(content, entities, self.bot_username)
+        reply_to_bot = self._is_direct_reply_to_bot(message)
+        prompt = command.prompt if command else mentioned_prompt
+        if prompt is None and reply_to_bot:
+            prompt = content.strip()
         if prompt is None:
             logger.debug(
                 "Ignored message chat_id=%d message_id=%d reason=bot_not_mentioned",
@@ -325,7 +329,7 @@ class MessageHandler:
                 message.message_id,
             )
             return
-        # Only context selected by an explicit mention/reply or /context reaches OpenAI.
+        # Replies to this bot's own group messages are also explicit invocations.
         try:
             if not prompt:
                 await self._send(bot, message, EMPTY_PROMPT)
@@ -411,6 +415,14 @@ class MessageHandler:
                         )
                     else:
                         context = await self._reply_context(message)
+                        if reply_to_bot and (context is None or not context.messages):
+                            parent = message.reply_to_message
+                            direct_parent = local_message_content(parent, self.bot_id)
+                            if direct_parent is not None:
+                                context = ReplyContext(
+                                    (direct_parent,),
+                                    context.truncation_reason if context else "not_connected",
+                                )
                         if context is not None and context.messages:
                             answer = await self.service.generate(
                                 prompt,
@@ -612,6 +624,22 @@ class MessageHandler:
         ):
             return None
         return max(parent.photo, key=lambda photo: photo.width * photo.height)
+
+    def _is_direct_reply_to_bot(self, message: Message) -> bool:
+        parent = message.reply_to_message
+        if (
+            parent is None
+            or message.external_reply is not None
+            or parent.chat.id != message.chat.id
+            or parent.from_user is None
+            or parent.from_user.id != self.bot_id
+            or not parent.from_user.is_bot
+        ):
+            return False
+        return not message.is_topic_message or (
+            message.message_thread_id is not None
+            and parent.message_thread_id in (None, message.message_thread_id)
+        )
 
     @staticmethod
     async def _download_photo(bot: Bot, photo: PhotoSize) -> bytes:

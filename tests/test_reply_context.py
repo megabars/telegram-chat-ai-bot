@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import User
 
 from app.services.openai_service import DEFAULT_INSTRUCTIONS, OpenAIService
 from app.services.telegram_history import TelegramHistoryService
@@ -125,6 +126,64 @@ async def test_chronological_roles_current_last_and_untrusted_instructions(
     assert kwargs["instructions"].startswith(DEFAULT_INSTRUCTIONS)
     assert kwargs["store"] is False
     assert not {"tools", "conversation", "previous_response_id"} & kwargs.keys()
+
+
+async def test_reply_to_own_bot_message_invokes_model_with_full_chain(
+    handler, history, sdk, telegram
+):
+    history.get_reply_chain.return_value = ReplyContext(
+        (ancestor(1, "Original user question"), ancestor(3, "Bot answer", own_bot=True))
+    )
+    bot_message = make_message(
+        "Bot answer",
+        message_id=3,
+        entities=False,
+        from_user=User(id=123456, is_bot=True, first_name="My bot"),
+    )
+    message = make_message("А можно подробнее?", entities=False, reply_to_message=bot_message)
+
+    await handler.handle(message, telegram)
+
+    history.get_reply_chain.assert_awaited_once_with(-100123, 7, 3, message_thread_id=None)
+    sdk.responses.create.assert_awaited_once()
+    inputs = sdk.responses.create.call_args.kwargs["input"]
+    assert [item["role"] for item in inputs] == ["user", "assistant", "user"]
+    assert [json.loads(item["content"])["text"] for item in inputs] == [
+        "Original user question",
+        "Bot answer",
+        "А можно подробнее?",
+    ]
+    assert telegram.send_message.call_args.kwargs["text"] == "Ответ"
+
+
+async def test_reply_to_bot_uses_direct_parent_when_history_is_unavailable(handler, sdk, telegram):
+    bot_message = make_message(
+        "Direct answer",
+        message_id=3,
+        entities=False,
+        from_user=User(id=123456, is_bot=True, first_name="My bot"),
+    )
+    await handler.handle(
+        make_message("Что?", entities=False, reply_to_message=bot_message), telegram
+    )
+    sdk.responses.create.assert_awaited_once()
+    inputs = sdk.responses.create.call_args.kwargs["input"]
+    assert [item["role"] for item in inputs] == ["user", "assistant", "user"]
+    assert inputs[0]["content"] == PARTIAL_MARKER
+    assert [json.loads(item["content"])["text"] for item in inputs[1:]] == ["Direct answer", "Что?"]
+
+
+async def test_reply_to_another_bot_does_not_invoke_model(handler, sdk, telegram):
+    other_bot = make_message(
+        "Other answer",
+        message_id=3,
+        entities=False,
+        from_user=User(id=987654, is_bot=True, first_name="Other bot"),
+    )
+    await handler.handle(
+        make_message("А можно подробнее?", entities=False, reply_to_message=other_bot), telegram
+    )
+    sdk.responses.create.assert_not_awaited()
 
 
 @pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("SECRET history text")])
