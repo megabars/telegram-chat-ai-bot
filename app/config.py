@@ -55,6 +55,10 @@ class Settings:
     image_daily_user_limit: int = 3
     image_daily_chat_limit: int = 10
     image_daily_timezone: str = "Asia/Tomsk"
+    link_read_enabled: bool = False
+    link_daily_user_limit: int = 3
+    link_daily_chat_limit: int = 10
+    link_daily_timezone: str = "Asia/Tomsk"
 
     def __post_init__(self) -> None:
         for name in ("telegram_bot_token", "openai_api_key", "openai_model"):
@@ -82,6 +86,8 @@ class Settings:
             "image_generation_timeout_seconds",
             "image_daily_user_limit",
             "image_daily_chat_limit",
+            "link_daily_user_limit",
+            "link_daily_chat_limit",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -131,6 +137,13 @@ class Settings:
                 ZoneInfo(self.image_daily_timezone)
             except (ZoneInfoNotFoundError, ValueError):
                 raise ConfigurationError("IMAGE_DAILY_TIMEZONE is invalid") from None
+        if self.link_read_enabled:
+            if not self.local_history_enabled:
+                raise ConfigurationError("Link reading requires LOCAL_HISTORY_ENABLED")
+            try:
+                ZoneInfo(self.link_daily_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ConfigurationError("LINK_DAILY_TIMEZONE is invalid") from None
 
     def digest_chat_allowed(self, chat_id: int) -> bool:
         return (
@@ -235,4 +248,8 @@ class Settings:
             image_daily_user_limit=number("IMAGE_DAILY_USER_LIMIT", 3),
             image_daily_chat_limit=number("IMAGE_DAILY_CHAT_LIMIT", 10),
             image_daily_timezone=os.getenv("IMAGE_DAILY_TIMEZONE", "Asia/Tomsk").strip(),
+            link_read_enabled=boolean("LINK_READ_ENABLED", False),
+            link_daily_user_limit=number("LINK_DAILY_USER_LIMIT", 3),
+            link_daily_chat_limit=number("LINK_DAILY_CHAT_LIMIT", 10),
+            link_daily_timezone=os.getenv("LINK_DAILY_TIMEZONE", "Asia/Tomsk").strip(),
         )

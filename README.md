@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context and a local SQLite rolling cache. Application version: **1.5.2**.
+context, explicit URL reading and a local SQLite rolling cache. Application version: **1.6.0**.
 
 [Русский](#russian) · [English](#english)
 
@@ -24,6 +24,8 @@ Telethon и aiosqlite. Работает через long polling, без вход
 - При `IMAGE_GENERATION_ENABLED=true`: `/image описание` создаёт изображение,
   `/edit описание` меняет одно фото, а `/mix описание` в подписи альбома из
   2–4 фото объединяет их по инструкции.
+- При `LINK_READ_ENABLED=true`: `/link https://example.com что узнать?` загружает
+  только эту ссылку и отвечает по тексту страницы; интернет-поиск не запускается.
 
 Обычные сообщения сохраняются **только локально**: Telegram → Ubuntu → SQLite.
 Они не вызывают OpenAI, embeddings, moderation или Telethon fetch при получении.
@@ -122,6 +124,23 @@ SQLite хранит только текст подписи либо `[photo]`, �
 перезапуске; ошибка Image API после отправки запроса расходует попытку, а ошибка
 проверки альбома или загрузки фото — нет. Изображения и текст описания не пишутся
 в журнал; видны тип запроса, размеры, длительность и usage, если его вернул API.
+
+### Чтение переданной ссылки
+
+По умолчанию выключено. Включите `LINK_READ_ENABLED=true`. В разрешённой группе
+отправьте `/link https://example.com что написано на странице?`; если вопрос не
+указан, бот кратко перескажет страницу. Сервер загружает только URL из команды,
+извлекает текст HTML или plain text и передаёт его модели вместе с вопросом.
+Поиск по интернету и переход по ссылкам со страницы не выполняются. В ответе
+указывается исходный URL. Загрузка ограничена 1 МиБ и 20 000 символами текста;
+разрешены только публичные HTTP/HTTPS-адреса, заблокированы локальные IP/сети,
+авторизация в URL, нестандартные порты и цепочки длиннее трёх перенаправлений.
+
+SQLite хранит отдельную квоту: **3 попытки на пользователя и 10 на чат в сутки**
+по `LINK_DAILY_TIMEZONE` (по умолчанию `Asia/Tomsk`). Попытка резервируется
+перед загрузкой, поэтому учитываются и ошибки загрузки/API. Отдельного тарифа за web search здесь нет:
+модель получает текст страницы обычным запросом, стоимость зависит от переданного
+текста и ответа по тарифу `OPENAI_MODEL`.
 
 ### Локальная настройка и запуск
 
@@ -227,6 +246,10 @@ Telegram chat/message ID для сопоставления с исходным �
 | `IMAGE_DAILY_USER_LIMIT` | `3` | Попыток `/image`, `/edit` и `/mix` на пользователя за сутки |
 | `IMAGE_DAILY_CHAT_LIMIT` | `10` | Попыток `/image`, `/edit` и `/mix` на весь чат за сутки |
 | `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Временная зона календарного дня для генерации |
+| `LINK_READ_ENABLED` | `false` | Разрешить `/link` для чтения только явно переданного URL |
+| `LINK_DAILY_USER_LIMIT` | `3` | Попыток чтения ссылки на пользователя за сутки |
+| `LINK_DAILY_CHAT_LIMIT` | `10` | Попыток чтения ссылки на чат за сутки |
+| `LINK_DAILY_TIMEZONE` | `Asia/Tomsk` | Временная зона календарного дня квоты ссылок |
 
 Boolean values — только `true`/`false`, числовые лимиты положительны, таймауты конечны.
 Cleanup threshold должен быть больше max messages; default N не больше max N.
@@ -557,6 +580,8 @@ HTTP port. The model is invoked through three text interactions:
 - With `IMAGE_GENERATION_ENABLED=true`, `/image description` creates one image;
   `/edit description` changes one photo, and `/mix description` in a 2–4 photo
   album caption combines the sources.
+- With `LINK_READ_ENABLED=true`, `/link https://example.com what should I know?`
+  reads only that supplied URL and answers from its page text; it does not search the web.
 
 Ordinary messages are stored **locally only**: Telegram → server → SQLite. They
 never trigger OpenAI, embeddings, moderation or Telethon fetch on receipt. Optional
@@ -652,6 +677,23 @@ in the same topic. Generation, editing and mixing share separate persisted daily
 independent of photo analysis. Failed Image API attempts consume a slot; invalid
 albums and failed downloads do not. Prompts and images are excluded from logs;
 request type, byte counts, duration and available API usage are logged.
+
+### Reading a supplied URL
+
+Disabled by default. Set `LINK_READ_ENABLED=true`. In an allowed group, use
+`/link https://example.com what does this page say?`; without a question the bot
+briefly summarizes the page. The server fetches only the URL in the command,
+extracts HTML or plain text, and sends that text and the question to the model.
+It does not search the web or follow links found on the page. The answer includes
+the source URL. Fetching is limited to 1 MiB and 20,000 extracted characters;
+only public HTTP/HTTPS addresses are allowed. Local/private IPs, URL credentials,
+nonstandard ports and redirect chains longer than three hops are blocked.
+
+SQLite stores an independent daily quota: **3 attempts per user and 10 per chat**
+using `LINK_DAILY_TIMEZONE` (default `Asia/Tomsk`). An attempt is reserved before
+fetching, including failed fetches and model requests. No web-search fee
+applies: the page text is sent in a normal model request, billed according to
+`OPENAI_MODEL` input/output token rates.
 
 ### Local setup and startup
 
@@ -757,6 +799,10 @@ include Telegram chat/message IDs to match them with the incoming message.
 | `IMAGE_DAILY_USER_LIMIT` | `3` | `/image`, `/edit` and `/mix` attempts per user per day |
 | `IMAGE_DAILY_CHAT_LIMIT` | `10` | `/image`, `/edit` and `/mix` attempts per chat per day |
 | `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Timezone for generation quota calendar days |
+| `LINK_READ_ENABLED` | `false` | Enable `/link` for an explicitly supplied URL only |
+| `LINK_DAILY_USER_LIMIT` | `3` | Link-reading attempts per user per day |
+| `LINK_DAILY_CHAT_LIMIT` | `10` | Link-reading attempts per chat per day |
+| `LINK_DAILY_TIMEZONE` | `Asia/Tomsk` | Timezone for link quota calendar days |
 
 Booleans accept only true/false; numeric limits must be positive and timeouts finite.
 Cleanup threshold must exceed max messages; default N cannot exceed maximum N.

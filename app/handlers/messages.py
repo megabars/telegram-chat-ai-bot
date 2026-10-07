@@ -17,6 +17,7 @@ from app.config import Settings
 from app.services.local_history import LocalHistoryService
 from app.services.openai_service import ModelRateLimited, ModelUnavailable, OpenAIService
 from app.services.telegram_history import TelegramHistoryService
+from app.services.url_reader import UrlFetchError, fetch_page
 from app.utils.context_command import (
     ContextCommandError,
     command_args,
@@ -57,6 +58,10 @@ MIX_WRONG_SCOPE = "Для /mix ответь вторым фото на перв�
 MIX_ALBUM_SIZE = "Для /mix нужно 2–4 фото в одном альбоме."
 EDIT_WRONG_SCOPE = "Для /edit приложи фото или ответь командой на фото в этом чате и теме."
 IMAGE_TOO_LARGE = "Получившееся изображение слишком большое для Telegram."
+LINK_DISABLED = "Чтение ссылок пока отключено."
+LINK_USAGE = "Используй: /link https://example.com что нужно узнать со страницы?"
+LINK_USER_LIMIT = "Твой суточный лимит чтения ссылок исчерпан. Попробуй завтра."
+LINK_CHAT_LIMIT = "Суточный лимит чтения ссылок для чата исчерпан. Попробуйте завтра."
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 TELEGRAM_ERRORS = (TelegramAPIError, TelegramNetworkError)
 PHOTO_DOWNLOAD_ERRORS = (*TELEGRAM_ERRORS, RuntimeError)
@@ -210,6 +215,7 @@ class MessageHandler:
         try:
             self._record_album_photo(message)
             args = context_command_args(message, self.bot_username)
+            link_args = command_args(message, self.bot_username, "/link")
             image_args = command_args(message, self.bot_username, "/image")
             mix_args = command_args(message, self.bot_username, "/mix")
             if mix_args is None:
@@ -218,6 +224,9 @@ class MessageHandler:
             if edit_args is None:
                 edit_args = command_args(message, self.bot_username, "/edit", caption=True)
             await self._store(message)
+            if link_args is not None:
+                await self._handle_link(message, bot, link_args)
+                return
             if image_args is not None or mix_args is not None or edit_args is not None:
                 await self._handle_image(message, bot, image_args, mix_args, edit_args)
                 return
@@ -598,6 +607,86 @@ class MessageHandler:
                 return
             if isinstance(sent, Message):
                 await self._store(sent)
+
+    async def _handle_link(self, message: Message, bot: Bot, args: str) -> None:
+        if not self.settings.link_read_enabled or self.local_history is None:
+            await self._send(bot, message, LINK_DISABLED)
+            return
+        if not message.from_user or message.from_user.is_bot or message.sender_chat is not None:
+            return
+        parts = args.split(maxsplit=1)
+        if not parts:
+            await self._send(bot, message, LINK_USAGE)
+            return
+        url = parts[0]
+        prompt = parts[1].strip() if len(parts) > 1 else "Кратко перескажи страницу."
+        if len(url) > 2048:
+            await self._send(bot, message, LINK_USAGE)
+            return
+        if len(prompt) > self.settings.max_input_chars:
+            await self._send(
+                bot,
+                message,
+                (
+                    "Вопрос слишком длинный. Максимальная длина — "
+                    f"{self.settings.max_input_chars} символов."
+                ),
+            )
+            return
+        if not self.limiter.allow(message.from_user.id):
+            await self._send(bot, message, LOCAL_RATE_LIMIT)
+            return
+        day = (
+            datetime.now(UTC)
+            .astimezone(ZoneInfo(self.settings.link_daily_timezone))
+            .date()
+            .isoformat()
+        )
+        claimed = await self.local_history.claim_link_request(
+            message.chat.id,
+            message.message_id,
+            message.from_user.id,
+            day,
+            user_limit=self.settings.link_daily_user_limit,
+            chat_limit=self.settings.link_daily_chat_limit,
+        )
+        if claimed != "accepted":
+            if claimed == "duplicate":
+                return
+            notice = (
+                LINK_USER_LIMIT
+                if claimed == "user_limit"
+                else LINK_CHAT_LIMIT
+                if claimed == "chat_limit"
+                else LINK_DISABLED
+            )
+            await self._send(bot, message, notice)
+            return
+        async with typing(bot, message):
+            try:
+                page_url, page_text = await fetch_page(url)
+            except UrlFetchError as exc:
+                await self._send(bot, message, str(exc))
+                return
+            except Exception as exc:
+                logger.warning("URL fetch failed kind=%s", type(exc).__name__)
+                await self._send(bot, message, "Не удалось загрузить страницу по этой ссылке.")
+                return
+            try:
+                answer = await self.service.generate_link_answer(
+                    prompt,
+                    page_url,
+                    page_text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                )
+            except ModelRateLimited:
+                await self._send(bot, message, MODEL_RATE_LIMIT)
+                return
+            except ModelUnavailable:
+                await self._send(bot, message, TEMPORARY_ERROR)
+                return
+            await self._send(bot, message, f"{answer}\n\nИсточник: {page_url}")
 
     def _record_album_photo(self, message: Message) -> None:
         if not message.media_group_id or not message.photo or not message.from_user:
