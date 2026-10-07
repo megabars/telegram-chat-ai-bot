@@ -35,6 +35,8 @@ from app.logging_config import SafeLogFilter
         ("daily_digest_hour", 24),
         ("daily_digest_context_chars", 0),
         ("daily_digest_max_output_tokens", 0),
+        ("photo_daily_user_limit", 0),
+        ("photo_daily_chat_limit", -1),
     ],
 )
 def test_invalid_config(settings, name, value):
@@ -76,6 +78,22 @@ def test_daily_digest_environment_defaults_and_opt_in(tmp_path, monkeypatch, cha
     assert settings.daily_digest_chat_ids == (
         frozenset({-1001, -1002}) if chat_ids else frozenset()
     )
+
+
+def test_photo_analysis_requires_history_and_valid_timezone(settings):
+    with pytest.raises(ConfigurationError):
+        replace(settings, photo_analysis_enabled=True)
+    with pytest.raises(ConfigurationError):
+        replace(
+            settings,
+            local_history_enabled=True,
+            photo_analysis_enabled=True,
+            photo_daily_timezone="Invalid/Timezone",
+        )
+    enabled = replace(settings, local_history_enabled=True, photo_analysis_enabled=True)
+    assert enabled.photo_daily_user_limit == 20
+    assert enabled.photo_daily_chat_limit == 20
+    assert enabled.photo_daily_timezone == "Asia/Tomsk"
 
 
 def test_secrets_and_exception_body_never_in_logs():

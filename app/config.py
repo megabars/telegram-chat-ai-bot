@@ -45,6 +45,10 @@ class Settings:
     daily_digest_timezone: str = "Asia/Tomsk"
     daily_digest_context_chars: int = 120000
     daily_digest_max_output_tokens: int = 600
+    photo_analysis_enabled: bool = False
+    photo_daily_user_limit: int = 20
+    photo_daily_chat_limit: int = 20
+    photo_daily_timezone: str = "Asia/Tomsk"
 
     def __post_init__(self) -> None:
         for name in ("telegram_bot_token", "openai_api_key", "openai_model"):
@@ -67,6 +71,8 @@ class Settings:
             "context_max_chars",
             "daily_digest_context_chars",
             "daily_digest_max_output_tokens",
+            "photo_daily_user_limit",
+            "photo_daily_chat_limit",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -100,6 +106,13 @@ class Settings:
                 ZoneInfo(self.daily_digest_timezone)
             except (ZoneInfoNotFoundError, ValueError):
                 raise ConfigurationError("DAILY_DIGEST_TIMEZONE is invalid") from None
+        if self.photo_analysis_enabled:
+            if not self.local_history_enabled:
+                raise ConfigurationError("Photo analysis requires LOCAL_HISTORY_ENABLED")
+            try:
+                ZoneInfo(self.photo_daily_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ConfigurationError("PHOTO_DAILY_TIMEZONE is invalid") from None
 
     def digest_chat_allowed(self, chat_id: int) -> bool:
         return (
@@ -192,4 +205,8 @@ class Settings:
             daily_digest_timezone=os.getenv("DAILY_DIGEST_TIMEZONE", "Asia/Tomsk").strip(),
             daily_digest_context_chars=number("DAILY_DIGEST_CONTEXT_CHARS", 120000),
             daily_digest_max_output_tokens=number("DAILY_DIGEST_MAX_OUTPUT_TOKENS", 600),
+            photo_analysis_enabled=boolean("PHOTO_ANALYSIS_ENABLED", False),
+            photo_daily_user_limit=number("PHOTO_DAILY_USER_LIMIT", 20),
+            photo_daily_chat_limit=number("PHOTO_DAILY_CHAT_LIMIT", 20),
+            photo_daily_timezone=os.getenv("PHOTO_DAILY_TIMEZONE", "Asia/Tomsk").strip(),
         )

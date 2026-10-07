@@ -3,11 +3,14 @@ import logging
 import random
 import re
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
+from io import BytesIO
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Router
 from aiogram.enums import ChatAction, ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter
-from aiogram.types import LinkPreviewOptions, Message, ReplyParameters
+from aiogram.types import LinkPreviewOptions, Message, PhotoSize, ReplyParameters
 
 from app.config import Settings
 from app.services.local_history import LocalHistoryService
@@ -35,7 +38,15 @@ EMPTY_PROMPT = "Напиши вопрос после упоминания мен
 LOCAL_RATE_LIMIT = "Слишком много запросов. Попробуй немного позже."
 MODEL_RATE_LIMIT = "Сейчас слишком много запросов. Попробуй чуть позже."
 TEMPORARY_ERROR = "Не удалось получить ответ от модели. Попробуй ещё раз немного позже."
+PHOTO_DISABLED = "Анализ фотографий пока отключён."
+PHOTO_UNAVAILABLE = "Не удалось загрузить фото. Попробуй отправить его ещё раз."
+PHOTO_TOO_LARGE = "Фото слишком большое для анализа. Отправь снимок меньше 10 МБ."
+PHOTO_WRONG_SCOPE = "Могу анализировать только фото из этого чата и этой темы."
+PHOTO_USER_LIMIT = "Твой суточный лимит анализа фото исчерпан. Попробуй завтра."
+PHOTO_CHAT_LIMIT = "Суточный лимит анализа фото для чата исчерпан. Попробуйте завтра."
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
 TELEGRAM_ERRORS = (TelegramAPIError, TelegramNetworkError)
+PHOTO_DOWNLOAD_ERRORS = (*TELEGRAM_ERRORS, RuntimeError)
 FUN_REPLIES = {
     "ептиль": ("Ептиль, бля 🙂", "Ну ептиль 😄", "Ёптиль-моптиль 🤷"),
     "ёптиль": ("Ептиль, бля 🙂", "Ну ептиль 😄", "Ёптиль-моптиль 🤷"),
@@ -270,7 +281,9 @@ class MessageHandler:
             return
         if not message.from_user or message.from_user.is_bot or message.sender_chat is not None:
             return  # No identifiable human user for the per-user limiter.
-        if message.from_user.id == self.bot_id or not message.text:
+        content = message.text if message.text is not None else message.caption
+        entities = message.entities if message.text is not None else message.caption_entities
+        if message.from_user.id == self.bot_id or not content:
             return
         command = None
         if command_args is not None:
@@ -279,11 +292,7 @@ class MessageHandler:
             except ContextCommandError as exc:
                 await self._send(bot, message, str(exc))
                 return
-        prompt = (
-            command.prompt
-            if command
-            else extract_prompt(message.text, message.entities, self.bot_username)
-        )
+        prompt = command.prompt if command else extract_prompt(content, entities, self.bot_username)
         if prompt is None:
             logger.debug(
                 "Ignored message chat_id=%d message_id=%d reason=bot_not_mentioned",
@@ -311,7 +320,59 @@ class MessageHandler:
                 return
             try:
                 async with typing(bot, message):
-                    if command is not None:
+                    has_photo = bool(
+                        message.photo
+                        or (message.reply_to_message and message.reply_to_message.photo)
+                    )
+                    if command is None and has_photo:
+                        if not self.settings.photo_analysis_enabled or self.local_history is None:
+                            await self._send(bot, message, PHOTO_DISABLED)
+                            return
+                        photo = self._photo_for_question(message)
+                        if photo is None:
+                            await self._send(bot, message, PHOTO_WRONG_SCOPE)
+                            return
+                        try:
+                            image = await self._download_photo(bot, photo)
+                        except ValueError:
+                            await self._send(bot, message, PHOTO_TOO_LARGE)
+                            return
+                        except PHOTO_DOWNLOAD_ERRORS as exc:
+                            logger.warning("Photo download failed kind=%s", type(exc).__name__)
+                            await self._send(bot, message, PHOTO_UNAVAILABLE)
+                            return
+                        day = (
+                            datetime.now(UTC)
+                            .astimezone(ZoneInfo(self.settings.photo_daily_timezone))
+                            .date()
+                            .isoformat()
+                        )
+                        claimed = await self.local_history.claim_photo_request(
+                            message.chat.id,
+                            message.message_id,
+                            message.from_user.id,
+                            day,
+                            user_limit=self.settings.photo_daily_user_limit,
+                            chat_limit=self.settings.photo_daily_chat_limit,
+                        )
+                        if claimed != "accepted":
+                            if claimed == "user_limit":
+                                notice = PHOTO_USER_LIMIT
+                            elif claimed == "chat_limit":
+                                notice = PHOTO_CHAT_LIMIT
+                            elif claimed == "duplicate":
+                                return
+                            else:
+                                notice = PHOTO_DISABLED
+                            await self._send(bot, message, notice)
+                            return
+                        answer = await self.service.generate_photo_question(
+                            prompt,
+                            image,
+                            chat_id=message.chat.id,
+                            message_id=message.message_id,
+                        )
+                    elif command is not None:
                         context = await self._recent_context(message, bot, command.limit, prompt)
                         if context is None:
                             return
@@ -325,22 +386,21 @@ class MessageHandler:
                         )
                     else:
                         context = await self._reply_context(message)
-                        answer = None
-                    if command is None and context is not None and context.messages:
-                        answer = await self.service.generate(
-                            prompt,
-                            context=context,
-                            current_author=message.from_user.full_name,
-                            request_type="reply_chain",
-                            chat_id=message.chat.id,
-                            message_id=message.message_id,
-                        )
-                    elif command is None:
-                        answer = await self.service.generate(
-                            prompt,
-                            chat_id=message.chat.id,
-                            message_id=message.message_id,
-                        )
+                        if context is not None and context.messages:
+                            answer = await self.service.generate(
+                                prompt,
+                                context=context,
+                                current_author=message.from_user.full_name,
+                                request_type="reply_chain",
+                                chat_id=message.chat.id,
+                                message_id=message.message_id,
+                            )
+                        else:
+                            answer = await self.service.generate(
+                                prompt,
+                                chat_id=message.chat.id,
+                                message_id=message.message_id,
+                            )
             except ModelRateLimited:
                 await self._send(bot, message, MODEL_RATE_LIMIT)
                 return
@@ -355,6 +415,41 @@ class MessageHandler:
             logger.error("Message processing failed kind=%s", type(exc).__name__)
             await self._send(bot, message, TEMPORARY_ERROR)
         # The outer handler tracks all cache writes and AI requests for shutdown.
+
+    @staticmethod
+    def _photo_for_question(message: Message) -> PhotoSize | None:
+        if message.photo:
+            return max(message.photo, key=lambda photo: photo.width * photo.height)
+        parent = message.reply_to_message
+        if parent is None or not parent.photo:
+            return None
+        if message.external_reply is not None or parent.chat.id != message.chat.id:
+            return None
+        if message.is_topic_message and (
+            message.message_thread_id is None
+            or parent.message_thread_id not in (None, message.message_thread_id)
+        ):
+            return None
+        return max(parent.photo, key=lambda photo: photo.width * photo.height)
+
+    @staticmethod
+    async def _download_photo(bot: Bot, photo: PhotoSize) -> bytes:
+        file = await bot.get_file(photo.file_id)
+        size = file.file_size or photo.file_size
+        if size is None:
+            raise RuntimeError("Photo file size is unavailable")
+        if size > MAX_PHOTO_BYTES:
+            raise ValueError("Photo file size exceeds limit")
+        if not file.file_path:
+            raise RuntimeError("Photo file path is unavailable")
+        buffer = BytesIO()
+        await bot.download_file(file.file_path, destination=buffer, timeout=30)
+        image = buffer.getvalue()
+        if len(image) > MAX_PHOTO_BYTES:
+            raise ValueError("Downloaded photo exceeds limit")
+        if not image.startswith(b"\xff\xd8\xff"):
+            raise RuntimeError("Downloaded photo is not JPEG")
+        return image
 
     async def _recent_context(
         self, message: Message, bot: Bot, limit: int, prompt: str
