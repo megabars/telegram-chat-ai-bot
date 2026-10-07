@@ -3,11 +3,15 @@ import logging
 import random
 import re
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
+from io import BytesIO
+from time import monotonic
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Router
 from aiogram.enums import ChatAction, ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter
-from aiogram.types import LinkPreviewOptions, Message, ReplyParameters
+from aiogram.types import BufferedInputFile, LinkPreviewOptions, Message, PhotoSize, ReplyParameters
 
 from app.config import Settings
 from app.services.local_history import LocalHistoryService
@@ -15,6 +19,7 @@ from app.services.openai_service import ModelRateLimited, ModelUnavailable, Open
 from app.services.telegram_history import TelegramHistoryService
 from app.utils.context_command import (
     ContextCommandError,
+    command_args,
     context_command_args,
     parse_context_command,
 )
@@ -35,7 +40,26 @@ EMPTY_PROMPT = "Напиши вопрос после упоминания мен
 LOCAL_RATE_LIMIT = "Слишком много запросов. Попробуй немного позже."
 MODEL_RATE_LIMIT = "Сейчас слишком много запросов. Попробуй чуть позже."
 TEMPORARY_ERROR = "Не удалось получить ответ от модели. Попробуй ещё раз немного позже."
+PHOTO_DISABLED = "Анализ фотографий пока отключён."
+PHOTO_UNAVAILABLE = "Не удалось загрузить фото. Попробуй отправить его ещё раз."
+PHOTO_TOO_LARGE = "Фото слишком большое для анализа. Отправь снимок меньше 10 МБ."
+PHOTO_WRONG_SCOPE = "Могу анализировать только фото из этого чата и этой темы."
+PHOTO_USER_LIMIT = "Твой суточный лимит анализа фото исчерпан. Попробуй завтра."
+PHOTO_CHAT_LIMIT = "Суточный лимит анализа фото для чата исчерпан. Попробуйте завтра."
+IMAGE_DISABLED = "Генерация изображений пока отключена."
+IMAGE_USAGE = (
+    "Напиши /image и описание картинки; /edit с фото — что изменить; "
+    "/mix с альбомом из 2–4 фото — как их объединить."
+)
+IMAGE_USER_LIMIT = "Твой суточный лимит генерации изображений исчерпан. Попробуй завтра."
+IMAGE_CHAT_LIMIT = "Суточный лимит генерации изображений для чата исчерпан. Попробуйте завтра."
+MIX_WRONG_SCOPE = "Для /mix ответь вторым фото на первое фото в этом чате и теме."
+MIX_ALBUM_SIZE = "Для /mix нужно 2–4 фото в одном альбоме."
+EDIT_WRONG_SCOPE = "Для /edit приложи фото или ответь командой на фото в этом чате и теме."
+IMAGE_TOO_LARGE = "Получившееся изображение слишком большое для Telegram."
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
 TELEGRAM_ERRORS = (TelegramAPIError, TelegramNetworkError)
+PHOTO_DOWNLOAD_ERRORS = (*TELEGRAM_ERRORS, RuntimeError)
 FUN_REPLIES = {
     "ептиль": ("Ептиль, бля 🙂", "Ну ептиль 😄", "Ёптиль-моптиль 🤷"),
     "ёптиль": ("Ептиль, бля 🙂", "Ну ептиль 😄", "Ёптиль-моптиль 🤷"),
@@ -169,6 +193,7 @@ class MessageHandler:
         self._stopping = False
         self._fun_reply_order: dict[str, list[str]] = {}
         self._fun_reply_last: dict[str, str] = {}
+        self._albums: dict[tuple[int, str], tuple[float, dict[int, Message]]] = {}
 
     def router(self) -> Router:
         router = Router(name="mention_only")
@@ -183,8 +208,19 @@ class MessageHandler:
         if task is not None:
             self._active.add(task)
         try:
+            self._record_album_photo(message)
             args = context_command_args(message, self.bot_username)
+            image_args = command_args(message, self.bot_username, "/image")
+            mix_args = command_args(message, self.bot_username, "/mix")
+            if mix_args is None:
+                mix_args = command_args(message, self.bot_username, "/mix", caption=True)
+            edit_args = command_args(message, self.bot_username, "/edit")
+            if edit_args is None:
+                edit_args = command_args(message, self.bot_username, "/edit", caption=True)
             await self._store(message)
+            if image_args is not None or mix_args is not None or edit_args is not None:
+                await self._handle_image(message, bot, image_args, mix_args, edit_args)
+                return
             fun_reply = self._fun_reply(message)
             if fun_reply is not None:
                 await self._send(bot, message, fun_reply)
@@ -270,7 +306,9 @@ class MessageHandler:
             return
         if not message.from_user or message.from_user.is_bot or message.sender_chat is not None:
             return  # No identifiable human user for the per-user limiter.
-        if message.from_user.id == self.bot_id or not message.text:
+        content = message.text if message.text is not None else message.caption
+        entities = message.entities if message.text is not None else message.caption_entities
+        if message.from_user.id == self.bot_id or not content:
             return
         command = None
         if command_args is not None:
@@ -279,11 +317,7 @@ class MessageHandler:
             except ContextCommandError as exc:
                 await self._send(bot, message, str(exc))
                 return
-        prompt = (
-            command.prompt
-            if command
-            else extract_prompt(message.text, message.entities, self.bot_username)
-        )
+        prompt = command.prompt if command else extract_prompt(content, entities, self.bot_username)
         if prompt is None:
             logger.debug(
                 "Ignored message chat_id=%d message_id=%d reason=bot_not_mentioned",
@@ -311,7 +345,59 @@ class MessageHandler:
                 return
             try:
                 async with typing(bot, message):
-                    if command is not None:
+                    has_photo = bool(
+                        message.photo
+                        or (message.reply_to_message and message.reply_to_message.photo)
+                    )
+                    if command is None and has_photo:
+                        if not self.settings.photo_analysis_enabled or self.local_history is None:
+                            await self._send(bot, message, PHOTO_DISABLED)
+                            return
+                        photo = self._photo_for_question(message)
+                        if photo is None:
+                            await self._send(bot, message, PHOTO_WRONG_SCOPE)
+                            return
+                        try:
+                            image = await self._download_photo(bot, photo)
+                        except ValueError:
+                            await self._send(bot, message, PHOTO_TOO_LARGE)
+                            return
+                        except PHOTO_DOWNLOAD_ERRORS as exc:
+                            logger.warning("Photo download failed kind=%s", type(exc).__name__)
+                            await self._send(bot, message, PHOTO_UNAVAILABLE)
+                            return
+                        day = (
+                            datetime.now(UTC)
+                            .astimezone(ZoneInfo(self.settings.photo_daily_timezone))
+                            .date()
+                            .isoformat()
+                        )
+                        claimed = await self.local_history.claim_photo_request(
+                            message.chat.id,
+                            message.message_id,
+                            message.from_user.id,
+                            day,
+                            user_limit=self.settings.photo_daily_user_limit,
+                            chat_limit=self.settings.photo_daily_chat_limit,
+                        )
+                        if claimed != "accepted":
+                            if claimed == "user_limit":
+                                notice = PHOTO_USER_LIMIT
+                            elif claimed == "chat_limit":
+                                notice = PHOTO_CHAT_LIMIT
+                            elif claimed == "duplicate":
+                                return
+                            else:
+                                notice = PHOTO_DISABLED
+                            await self._send(bot, message, notice)
+                            return
+                        answer = await self.service.generate_photo_question(
+                            prompt,
+                            image,
+                            chat_id=message.chat.id,
+                            message_id=message.message_id,
+                        )
+                    elif command is not None:
                         context = await self._recent_context(message, bot, command.limit, prompt)
                         if context is None:
                             return
@@ -325,22 +411,21 @@ class MessageHandler:
                         )
                     else:
                         context = await self._reply_context(message)
-                        answer = None
-                    if command is None and context is not None and context.messages:
-                        answer = await self.service.generate(
-                            prompt,
-                            context=context,
-                            current_author=message.from_user.full_name,
-                            request_type="reply_chain",
-                            chat_id=message.chat.id,
-                            message_id=message.message_id,
-                        )
-                    elif command is None:
-                        answer = await self.service.generate(
-                            prompt,
-                            chat_id=message.chat.id,
-                            message_id=message.message_id,
-                        )
+                        if context is not None and context.messages:
+                            answer = await self.service.generate(
+                                prompt,
+                                context=context,
+                                current_author=message.from_user.full_name,
+                                request_type="reply_chain",
+                                chat_id=message.chat.id,
+                                message_id=message.message_id,
+                            )
+                        else:
+                            answer = await self.service.generate(
+                                prompt,
+                                chat_id=message.chat.id,
+                                message_id=message.message_id,
+                            )
             except ModelRateLimited:
                 await self._send(bot, message, MODEL_RATE_LIMIT)
                 return
@@ -355,6 +440,197 @@ class MessageHandler:
             logger.error("Message processing failed kind=%s", type(exc).__name__)
             await self._send(bot, message, TEMPORARY_ERROR)
         # The outer handler tracks all cache writes and AI requests for shutdown.
+
+    async def _handle_image(
+        self,
+        message: Message,
+        bot: Bot,
+        image_args: str | None,
+        mix_args: str | None,
+        edit_args: str | None,
+    ) -> None:
+        if not message.from_user or message.from_user.is_bot or message.sender_chat is not None:
+            return
+        if not self.settings.image_generation_enabled or self.local_history is None:
+            await self._send(bot, message, IMAGE_DISABLED)
+            return
+        prompt = next(
+            (value for value in (image_args, mix_args, edit_args) if value is not None), None
+        )
+        if not prompt:
+            await self._send(bot, message, IMAGE_USAGE)
+            return
+        if len(prompt) > self.settings.max_input_chars:
+            await self._send(
+                bot,
+                message,
+                f"Описание слишком длинное: максимум {self.settings.max_input_chars} символов.",
+            )
+            return
+        photos = None
+        if mix_args is not None:
+            if message.media_group_id:
+                await asyncio.sleep(2)
+                key = (message.chat.id, message.media_group_id)
+                album = self._albums.pop(key, (0, {}))[1]
+                members = sorted(album.values(), key=lambda item: item.message_id)
+                if not 2 <= len(members) <= 4 or any(
+                    not item.photo
+                    or not item.from_user
+                    or item.from_user.id != message.from_user.id
+                    or item.message_thread_id != message.message_thread_id
+                    for item in members
+                ):
+                    await self._send(bot, message, MIX_ALBUM_SIZE)
+                    return
+                photos = tuple(
+                    max(item.photo, key=lambda photo: photo.width * photo.height)
+                    for item in members
+                )
+            else:
+                parent = message.reply_to_message
+                if (
+                    not message.photo
+                    or parent is None
+                    or not parent.photo
+                    or message.external_reply is not None
+                    or parent.chat.id != message.chat.id
+                    or (
+                        message.is_topic_message
+                        and (
+                            message.message_thread_id is None
+                            or parent.message_thread_id not in (None, message.message_thread_id)
+                        )
+                    )
+                ):
+                    await self._send(bot, message, MIX_WRONG_SCOPE)
+                    return
+                photos = (
+                    max(parent.photo, key=lambda item: item.width * item.height),
+                    max(message.photo, key=lambda item: item.width * item.height),
+                )
+        elif edit_args is not None:
+            photo = self._photo_for_question(message)
+            if photo is None:
+                await self._send(bot, message, EDIT_WRONG_SCOPE)
+                return
+            photos = (photo,)
+        if not self.limiter.allow(message.from_user.id):
+            await self._send(bot, message, LOCAL_RATE_LIMIT)
+            return
+        async with typing(bot, message):
+            images = None
+            if photos is not None:
+                try:
+                    images = [await self._download_photo(bot, photo) for photo in photos]
+                except ValueError:
+                    await self._send(bot, message, PHOTO_TOO_LARGE)
+                    return
+                except PHOTO_DOWNLOAD_ERRORS as exc:
+                    logger.warning("Mix photo download failed kind=%s", type(exc).__name__)
+                    await self._send(bot, message, PHOTO_UNAVAILABLE)
+                    return
+            day = (
+                datetime.now(UTC)
+                .astimezone(ZoneInfo(self.settings.image_daily_timezone))
+                .date()
+                .isoformat()
+            )
+            claimed = await self.local_history.claim_image_request(
+                message.chat.id,
+                message.message_id,
+                message.from_user.id,
+                day,
+                user_limit=self.settings.image_daily_user_limit,
+                chat_limit=self.settings.image_daily_chat_limit,
+            )
+            if claimed != "accepted":
+                if claimed == "duplicate":
+                    return
+                notice = (
+                    IMAGE_USER_LIMIT
+                    if claimed == "user_limit"
+                    else IMAGE_CHAT_LIMIT
+                    if claimed == "chat_limit"
+                    else IMAGE_DISABLED
+                )
+                await self._send(bot, message, notice)
+                return
+            try:
+                generated = await self.service.generate_image(
+                    prompt, images=images, chat_id=message.chat.id, message_id=message.message_id
+                )
+            except ModelRateLimited:
+                await self._send(bot, message, MODEL_RATE_LIMIT)
+                return
+            except ModelUnavailable:
+                await self._send(bot, message, TEMPORARY_ERROR)
+                return
+            if len(generated) > MAX_PHOTO_BYTES:
+                logger.warning(
+                    "Generated image exceeds Telegram photo limit bytes=%d", len(generated)
+                )
+                await self._send(bot, message, IMAGE_TOO_LARGE)
+                return
+            try:
+                sent = await bot.send_photo(
+                    chat_id=message.chat.id,
+                    photo=BufferedInputFile(generated, filename="image.jpg"),
+                    message_thread_id=message.message_thread_id,
+                    reply_parameters=ReplyParameters(
+                        message_id=message.message_id, allow_sending_without_reply=True
+                    ),
+                )
+            except TELEGRAM_ERRORS as exc:
+                logger.warning("Telegram image send failure kind=%s", type(exc).__name__)
+                return
+            if isinstance(sent, Message):
+                await self._store(sent)
+
+    def _record_album_photo(self, message: Message) -> None:
+        if not message.media_group_id or not message.photo or not message.from_user:
+            return
+        now = monotonic()
+        self._albums = {key: value for key, value in self._albums.items() if now - value[0] < 60}
+        key = (message.chat.id, message.media_group_id)
+        _, members = self._albums.get(key, (now, {}))
+        members[message.message_id] = message
+        self._albums[key] = (now, members)
+
+    @staticmethod
+    def _photo_for_question(message: Message) -> PhotoSize | None:
+        if message.photo:
+            return max(message.photo, key=lambda photo: photo.width * photo.height)
+        parent = message.reply_to_message
+        if parent is None or not parent.photo:
+            return None
+        if message.external_reply is not None or parent.chat.id != message.chat.id:
+            return None
+        if message.is_topic_message and (
+            message.message_thread_id is None
+            or parent.message_thread_id not in (None, message.message_thread_id)
+        ):
+            return None
+        return max(parent.photo, key=lambda photo: photo.width * photo.height)
+
+    @staticmethod
+    async def _download_photo(bot: Bot, photo: PhotoSize) -> bytes:
+        file = await bot.get_file(photo.file_id)
+        size = file.file_size or photo.file_size
+        if size is None:
+            raise RuntimeError("Photo file size is unavailable")
+        if size > MAX_PHOTO_BYTES:
+            raise ValueError("Photo file size exceeds limit")
+        if not file.file_path:
+            raise RuntimeError("Photo file path is unavailable")
+        buffer = BytesIO()
+        await bot.download_file(file.file_path, destination=buffer, timeout=30)
+        image = buffer.getvalue()
+        if len(image) > MAX_PHOTO_BYTES:
+            raise ValueError("Downloaded photo exceeds limit")
+        if not image.startswith(b"\xff\xd8\xff"):
+            raise RuntimeError("Downloaded photo is not JPEG")
+        return image
 
     async def _recent_context(
         self, message: Message, bot: Bot, limit: int, prompt: str

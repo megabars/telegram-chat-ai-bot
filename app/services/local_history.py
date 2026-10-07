@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -49,6 +49,26 @@ CREATE TABLE IF NOT EXISTS daily_digests (
     sent_messages TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (chat_id, digest_date)
 );
+CREATE TABLE IF NOT EXISTS photo_analysis_requests (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_analysis_requests_daily
+ON photo_analysis_requests(day, chat_id, user_id);
+CREATE TABLE IF NOT EXISTS image_generation_requests (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_image_generation_requests_daily
+ON image_generation_requests(day, chat_id, user_id);
 """
 INSERT = """INSERT OR IGNORE INTO telegram_messages (
     chat_id, message_id, message_thread_id, sender_id, sender_name, sender_username,
@@ -307,6 +327,97 @@ class LocalHistoryService:
             if secret and value:
                 value = value.replace(secret, "[REDACTED]")
         return value
+
+    async def claim_photo_request(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        day: str,
+        *,
+        user_limit: int,
+        chat_limit: int,
+    ) -> str:
+        """Reserve one model attempt atomically; a failed API attempt still uses the quota."""
+        if not self.settings.photo_analysis_enabled or not self._allowed(chat_id):
+            return "forbidden"
+        return await self._claim_daily_request(
+            "photo_analysis_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
+        )
+
+    async def claim_image_request(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        day: str,
+        *,
+        user_limit: int,
+        chat_limit: int,
+    ) -> str:
+        if not self.settings.image_generation_enabled or not self._allowed(chat_id):
+            return "forbidden"
+        return await self._claim_daily_request(
+            "image_generation_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
+        )
+
+    async def _claim_daily_request(
+        self,
+        table: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        day: str,
+        user_limit: int,
+        chat_limit: int,
+    ) -> str:
+        # Table is selected only by the two constant wrapper methods above.
+        before = (date.fromisoformat(day) - timedelta(days=30)).isoformat()
+        async with self._lock:
+
+            async def claim() -> str:
+                db = self._db()
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    await db.execute(f"DELETE FROM {table} WHERE day<?", (before,))
+                    existing = await db.execute_fetchall(
+                        f"SELECT 1 FROM {table} WHERE chat_id=? AND message_id=?",
+                        (chat_id, message_id),
+                    )
+                    if existing:
+                        result = "duplicate"
+                    else:
+                        counts = await db.execute_fetchall(
+                            "SELECT COUNT(*) AS chat_count, "
+                            "COUNT(*) FILTER (WHERE user_id=?) AS user_count "
+                            f"FROM {table} WHERE day=? AND chat_id=?",
+                            (user_id, day, chat_id),
+                        )
+                        count = counts[0]
+                        if count["user_count"] >= user_limit:
+                            result = "user_limit"
+                        elif count["chat_count"] >= chat_limit:
+                            result = "chat_limit"
+                        else:
+                            await db.execute(
+                                f"INSERT INTO {table} "
+                                "(chat_id,message_id,user_id,day,created_at) VALUES (?,?,?,?,?)",
+                                (
+                                    chat_id,
+                                    message_id,
+                                    user_id,
+                                    day,
+                                    int(datetime.now(UTC).timestamp()),
+                                ),
+                            )
+                            result = "accepted"
+                    await db.commit()
+                    return result
+                except BaseException:
+                    await db.rollback()
+                    raise
+
+            return await self._finish_write(claim())
 
     async def _migrate_digest_schema(self) -> None:
         # Upgrade the original PR schema without resetting existing delivery markers.

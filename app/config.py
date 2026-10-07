@@ -45,6 +45,16 @@ class Settings:
     daily_digest_timezone: str = "Asia/Tomsk"
     daily_digest_context_chars: int = 120000
     daily_digest_max_output_tokens: int = 600
+    photo_analysis_enabled: bool = False
+    photo_daily_user_limit: int = 20
+    photo_daily_chat_limit: int = 20
+    photo_daily_timezone: str = "Asia/Tomsk"
+    image_generation_enabled: bool = False
+    image_generation_model: str = "gpt-image-2.5-flare"
+    image_generation_timeout_seconds: float = 180
+    image_daily_user_limit: int = 3
+    image_daily_chat_limit: int = 10
+    image_daily_timezone: str = "Asia/Tomsk"
 
     def __post_init__(self) -> None:
         for name in ("telegram_bot_token", "openai_api_key", "openai_model"):
@@ -67,6 +77,11 @@ class Settings:
             "context_max_chars",
             "daily_digest_context_chars",
             "daily_digest_max_output_tokens",
+            "photo_daily_user_limit",
+            "photo_daily_chat_limit",
+            "image_generation_timeout_seconds",
+            "image_daily_user_limit",
+            "image_daily_chat_limit",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -100,6 +115,22 @@ class Settings:
                 ZoneInfo(self.daily_digest_timezone)
             except (ZoneInfoNotFoundError, ValueError):
                 raise ConfigurationError("DAILY_DIGEST_TIMEZONE is invalid") from None
+        if self.photo_analysis_enabled:
+            if not self.local_history_enabled:
+                raise ConfigurationError("Photo analysis requires LOCAL_HISTORY_ENABLED")
+            try:
+                ZoneInfo(self.photo_daily_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ConfigurationError("PHOTO_DAILY_TIMEZONE is invalid") from None
+        if self.image_generation_enabled:
+            if not self.local_history_enabled:
+                raise ConfigurationError("Image generation requires LOCAL_HISTORY_ENABLED")
+            if not self.image_generation_model.strip():
+                raise ConfigurationError("IMAGE_GENERATION_MODEL must be set")
+            try:
+                ZoneInfo(self.image_daily_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ConfigurationError("IMAGE_DAILY_TIMEZONE is invalid") from None
 
     def digest_chat_allowed(self, chat_id: int) -> bool:
         return (
@@ -192,4 +223,16 @@ class Settings:
             daily_digest_timezone=os.getenv("DAILY_DIGEST_TIMEZONE", "Asia/Tomsk").strip(),
             daily_digest_context_chars=number("DAILY_DIGEST_CONTEXT_CHARS", 120000),
             daily_digest_max_output_tokens=number("DAILY_DIGEST_MAX_OUTPUT_TOKENS", 600),
+            photo_analysis_enabled=boolean("PHOTO_ANALYSIS_ENABLED", False),
+            photo_daily_user_limit=number("PHOTO_DAILY_USER_LIMIT", 20),
+            photo_daily_chat_limit=number("PHOTO_DAILY_CHAT_LIMIT", 20),
+            photo_daily_timezone=os.getenv("PHOTO_DAILY_TIMEZONE", "Asia/Tomsk").strip(),
+            image_generation_enabled=boolean("IMAGE_GENERATION_ENABLED", False),
+            image_generation_model=os.getenv(
+                "IMAGE_GENERATION_MODEL", "gpt-image-2.5-flare"
+            ).strip(),
+            image_generation_timeout_seconds=number("IMAGE_GENERATION_TIMEOUT_SECONDS", 180, float),
+            image_daily_user_limit=number("IMAGE_DAILY_USER_LIMIT", 3),
+            image_daily_chat_limit=number("IMAGE_DAILY_CHAT_LIMIT", 10),
+            image_daily_timezone=os.getenv("IMAGE_DAILY_TIMEZONE", "Asia/Tomsk").strip(),
         )
