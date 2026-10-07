@@ -108,9 +108,7 @@ async def test_link_quota_is_persistent_and_independent(local_history):
     await local_history.start()
     assert await claim(4, 11) == "accepted"
     assert await claim(5, 12) == "chat_limit"
-    photo_rows = await local_history._db().execute_fetchall(
-        "SELECT * FROM photo_analysis_requests"
-    )
+    photo_rows = await local_history._db().execute_fetchall("SELECT * FROM photo_analysis_requests")
     assert photo_rows == []
 
 
