@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS image_generation_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_image_generation_requests_daily
 ON image_generation_requests(day, chat_id, user_id);
+CREATE TABLE IF NOT EXISTS link_read_requests (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_link_read_requests_daily
+ON link_read_requests(day, chat_id, user_id);
 """
 INSERT = """INSERT OR IGNORE INTO telegram_messages (
     chat_id, message_id, message_thread_id, sender_id, sender_name, sender_username,
@@ -361,6 +371,22 @@ class LocalHistoryService:
             "image_generation_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
         )
 
+    async def claim_link_request(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        day: str,
+        *,
+        user_limit: int,
+        chat_limit: int,
+    ) -> str:
+        if not self.settings.link_read_enabled or not self._allowed(chat_id):
+            return "forbidden"
+        return await self._claim_daily_request(
+            "link_read_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
+        )
+
     async def _claim_daily_request(
         self,
         table: str,
@@ -371,7 +397,7 @@ class LocalHistoryService:
         user_limit: int,
         chat_limit: int,
     ) -> str:
-        # Table is selected only by the two constant wrapper methods above.
+        # Table is selected only by these constant wrapper methods.
         before = (date.fromisoformat(day) - timedelta(days=30)).isoformat()
         async with self._lock:
 

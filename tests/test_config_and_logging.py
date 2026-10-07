@@ -40,6 +40,8 @@ from app.logging_config import SafeLogFilter
         ("image_generation_timeout_seconds", 0),
         ("image_daily_user_limit", 0),
         ("image_daily_chat_limit", -1),
+        ("link_daily_user_limit", 0),
+        ("link_daily_chat_limit", -1),
     ],
 )
 def test_invalid_config(settings, name, value):
@@ -113,6 +115,22 @@ def test_image_generation_requires_history_and_valid_timezone(settings):
     assert enabled.image_daily_user_limit == 3
     assert enabled.image_daily_chat_limit == 10
     assert enabled.image_daily_timezone == "Asia/Tomsk"
+
+
+def test_link_read_requires_history_and_valid_timezone(settings):
+    with pytest.raises(ConfigurationError):
+        replace(settings, link_read_enabled=True)
+    with pytest.raises(ConfigurationError):
+        replace(
+            settings,
+            local_history_enabled=True,
+            link_read_enabled=True,
+            link_daily_timezone="Invalid/Timezone",
+        )
+    enabled = replace(settings, local_history_enabled=True, link_read_enabled=True)
+    assert enabled.link_daily_user_limit == 3
+    assert enabled.link_daily_chat_limit == 10
+    assert enabled.link_daily_timezone == "Asia/Tomsk"
 
 
 def test_secrets_and_exception_body_never_in_logs():
