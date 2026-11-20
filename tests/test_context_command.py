@@ -69,7 +69,7 @@ async def test_100_ordinary_messages_cost_zero_then_exact_50_snapshot(
     assert len(await rows(local_history)) == 102  # 100 received + command + outgoing.
 
 
-@pytest.mark.parametrize("text,expected_rows", [("Всем здравия", 1), ("Всем привет", 2)])
+@pytest.mark.parametrize("text,expected_rows", [("Всем здравия", 1), ("Всем привет", 1)])
 async def test_one_ordinary_message_is_local_only(
     cache_handler, local_history, sdk, telegram, text, expected_rows
 ):

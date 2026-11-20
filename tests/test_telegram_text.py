@@ -14,6 +14,13 @@ def test_preserves_text_and_limit(text):
     assert all(0 < len(p.encode("utf-16-le")) // 2 <= 4096 for p in parts)
 
 
+def test_exact_telegram_limit_stays_in_one_message():
+    text = "x" * 4096
+    parts = split_telegram_text(text)
+    assert parts == [text]
+    assert len(parts[0].encode("utf-16-le")) // 2 == 4096
+
+
 @pytest.mark.parametrize("separator", ["\n\n", "\n", ". "])
 def test_preferred_break(separator):
     text = "a" * 2500 + separator + "b" * 3000
