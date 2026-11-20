@@ -42,10 +42,7 @@ DIGEST_SECTION_EMOJIS = {
 _DIGEST_BOLD_PATTERN = re.compile(r"(\*\*|__)(.+?)\1", re.DOTALL)
 DIGEST_PROMPT = """Подготовь краткую сводку чата за {date}. Используй ровно эти заголовки разделов,
 каждый на отдельной строке:
-📊 Итоги
-📌 Важные темы
-❓ Открытые вопросы
-✅ Договорённости и задачи
+{section_headings}
 Не используй Markdown, звёздочки,
 подчёркивания, HTML или таблицы. Не выдумывай факты. Это лишь сохранённая часть
 переписки, не полный архив дня. Отсутствие ответа не доказывает, что вопрос не решён.
@@ -168,7 +165,10 @@ class DailyDigestService:
             payload = state["payload"]
             if payload is None:
                 messages = await self.history.get_daily_messages(chat_id, start, end)
-                prompt = DIGEST_PROMPT.format(date=day)
+                section_headings = "\n".join(
+                    f"{emoji} {title}" for title, emoji in DIGEST_SECTION_EMOJIS.items()
+                )
+                prompt = DIGEST_PROMPT.format(date=day, section_headings=section_headings)
                 context = select_digest_messages(
                     messages, self.settings.daily_digest_context_chars, prompt
                 )
