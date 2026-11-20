@@ -54,6 +54,8 @@ class Settings:
     image_generation_timeout_seconds: float = 180
     image_daily_user_limit: int = 3
     image_daily_chat_limit: int = 10
+    image_edit_daily_user_limit: int = 15
+    image_edit_daily_chat_limit: int = 30
     image_daily_timezone: str = "Asia/Tomsk"
     link_read_enabled: bool = False
     link_daily_user_limit: int = 3
@@ -86,6 +88,8 @@ class Settings:
             "image_generation_timeout_seconds",
             "image_daily_user_limit",
             "image_daily_chat_limit",
+            "image_edit_daily_user_limit",
+            "image_edit_daily_chat_limit",
             "link_daily_user_limit",
             "link_daily_chat_limit",
         ):
@@ -247,6 +251,8 @@ class Settings:
             image_generation_timeout_seconds=number("IMAGE_GENERATION_TIMEOUT_SECONDS", 180, float),
             image_daily_user_limit=number("IMAGE_DAILY_USER_LIMIT", 3),
             image_daily_chat_limit=number("IMAGE_DAILY_CHAT_LIMIT", 10),
+            image_edit_daily_user_limit=number("IMAGE_EDIT_DAILY_USER_LIMIT", 15),
+            image_edit_daily_chat_limit=number("IMAGE_EDIT_DAILY_CHAT_LIMIT", 30),
             image_daily_timezone=os.getenv("IMAGE_DAILY_TIMEZONE", "Asia/Tomsk").strip(),
             link_read_enabled=boolean("LINK_READ_ENABLED", False),
             link_daily_user_limit=number("LINK_DAILY_USER_LIMIT", 3),
