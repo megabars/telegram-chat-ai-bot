@@ -52,6 +52,16 @@ async def test_mention_only_is_local(handler, sdk, telegram):
     assert telegram.send_message.call_args.kwargs["text"] == EMPTY_PROMPT
 
 
+async def test_mention_sends_model_bold_as_a_telegram_entity(handler, sdk, telegram):
+    sdk.responses.create.return_value.output_text = "🙂 ** ооо **"
+    await handler.handle(make_message(), telegram)
+    sent = telegram.send_message.call_args.kwargs
+    assert sent["text"] == "🙂 ооо"
+    assert sent["parse_mode"] is None
+    [entity] = sent["entities"]
+    assert (entity.type, entity.offset, entity.length) == ("bold", 3, 3)
+
+
 @pytest.mark.parametrize(
     "text,trigger",
     [

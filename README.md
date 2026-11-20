@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context, explicit URL reading and a local SQLite rolling cache. Application version: **1.7.2**.
+context, explicit URL reading and a local SQLite rolling cache. Application version: **1.7.3**.
 
 [Русский](#russian) · [English](#english)
 
@@ -38,9 +38,10 @@ service events и edits сами по себе не вызывают модел�
 
 Username/ID получаются через getMe; mention и command проверяются по Telegram
 entities с учётом UTF-16. Reply без нового mention вызывает AI, если ответили
-на собственное сообщение бота. Ответы — plain
-text в исходном чате/теме, первая часть — reply. Длинные ответы разбиваются до
-4096 UTF-16 units, preview ссылок выключен, во время запроса показывается typing.
+на собственное сообщение бота. Жирный текст, курсив, заголовки и код в ответах
+модели оформляются средствами Telegram. Ответ приходит в исходную тему, первая часть —
+ответ на запрос. Длинные ответы разбиваются до 4096 единиц UTF-16 с сохранением стилей.
+Предпросмотр ссылок выключен, во время запроса показывается индикатор набора текста.
 Модель отвечает на языке пользователя; локальные служебные ответы — на русском.
 
 ### Требования и получение ключей
@@ -530,7 +531,7 @@ Telegram handlers не больше concurrency×4, общий AI timeout вкл
 bash -n install.sh
 ```
 
-**352 офлайн-теста** проходят на Python 3.12; сеть в тестах блокируется,
+**356 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
 SQLite — только temporary databases. Есть проверки 100 обычных updates → 0 AI/fetch,
 /context → 1 AI, snapshot, topics, roles/injection, edits, outgoing messages,
 5100→5000 cleanup per chat, concurrency, lifecycle, deadlines, UTF-16 и безопасных
@@ -598,10 +599,11 @@ service events and edits cannot initiate a model call.
 
 Bot username/ID come from getMe. Mentions and commands use Telegram entities with
 UTF-16 offsets. A reply without a fresh mention invokes AI when it replies to
-this bot's own message. Answers are
-plain text in the original chat/topic, with the first part replying to the request.
-Long answers are split at 4096 UTF-16 units; link previews are off and typing is
-shown while processing. Model answers follow the user's language; local status
+this bot's own message. The bot renders bold, italics, headings and code in model
+answers using Telegram formatting. It sends responses to the original chat and topic,
+with the first part replying to the request. Long answers are split at 4096 UTF-16
+units with styles preserved. Link previews are off and typing is shown while
+processing. Model answers follow the user's language; local status
 and error messages are in Russian.
 
 ### Requirements and credentials
@@ -1085,7 +1087,7 @@ does not guarantee zero charges if the provider has started processing it.
 bash -n install.sh
 ```
 
-**352 offline tests** pass on Python 3.12. Tests block network
+**356 offline tests** pass on Python 3.12. Tests block network
 access and use temporary SQLite databases only. Coverage includes 100 ordinary
 updates → 0 AI/fetch, /context → 1 AI, snapshots, topics, roles/injection, edits,
 outgoing messages, per-chat 5100→5000 cleanup, concurrency, lifecycle, deadlines,

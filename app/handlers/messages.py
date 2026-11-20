@@ -40,7 +40,7 @@ from app.utils.reply_context import (
     limit_reply_context,
     render_current_question,
 )
-from app.utils.telegram_text import split_telegram_text
+from app.utils.telegram_text import format_telegram_text, split_telegram_text
 
 logger = logging.getLogger(__name__)
 EMPTY_PROMPT = "Напиши вопрос после упоминания меня 🙂"
@@ -388,7 +388,7 @@ class MessageHandler:
             except ModelUnavailable:
                 await self._send(bot, message, TEMPORARY_ERROR)
                 return
-            await self._send(bot, message, answer)
+            await self._send(bot, message, answer, model_answer=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -665,7 +665,9 @@ class MessageHandler:
             except ModelUnavailable:
                 await self._send(bot, message, TEMPORARY_ERROR)
                 return
-            await self._send(bot, message, f"{answer}\n\nИсточник: {page_url}")
+            await self._send(
+                bot, message, answer, model_answer=True, literal_suffix=f"\n\nИсточник: {page_url}"
+            )
 
     def _record_album_photo(self, message: Message) -> None:
         if not message.media_group_id or not message.photo or not message.from_user:
@@ -829,8 +831,22 @@ class MessageHandler:
             )
             return None
 
-    async def _send(self, bot: Bot, message: Message, text: str) -> None:
-        for index, part in enumerate(split_telegram_text(text)):
+    async def _send(
+        self,
+        bot: Bot,
+        message: Message,
+        text: str,
+        *,
+        model_answer: bool = False,
+        literal_suffix: str = "",
+    ) -> None:
+        parts = (
+            format_telegram_text(text, literal_suffix=literal_suffix)
+            if model_answer
+            else [(part, []) for part in split_telegram_text(text)]
+        )
+        first_part = True
+        for part, entities in parts:
             if not part.strip():
                 continue  # Telegram rejects whitespace-only messages.
             kwargs = dict(
@@ -843,9 +859,12 @@ class MessageHandler:
                     message_id=message.message_id,
                     allow_sending_without_reply=True,
                 )
-                if index == 0
+                if first_part
                 else None,
             )
+            if entities:
+                kwargs["entities"] = entities
+            first_part = False
             try:
                 sent = await bot.send_message(**kwargs)
             except TelegramRetryAfter as exc:
