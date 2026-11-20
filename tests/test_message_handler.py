@@ -16,8 +16,8 @@ from tests.conftest import make_message
 @pytest.mark.parametrize(
     "text,entities,trigger",
     [
-        ("Всем привет", True, "привет"),
-        ("Кто сегодня идёт на встречу?", True, "кто"),
+        ("Всем привет", True, None),
+        ("Кто сегодня идёт на встречу?", True, None),
         ("@my_bot_test привет", True, None),
         ("текст @my_bot текст", False, None),
     ],
@@ -58,8 +58,6 @@ async def test_mention_only_is_local(handler, sdk, telegram):
         ("ептиль", "ептиль"),
         ("ЕПТИЛЬ", "ептиль"),
         ("Ну ЁпТиЛь бля", "ёптиль"),
-        ("сижу дома", "сижу"),
-        ("чекаво?", "чекаво"),
     ],
 )
 async def test_fun_reply_does_not_call_model(handler, sdk, telegram, text, trigger):
@@ -68,18 +66,21 @@ async def test_fun_reply_does_not_call_model(handler, sdk, telegram, text, trigg
     assert telegram.send_message.call_args.kwargs["text"] in FUN_REPLIES[trigger]
 
 
-async def test_fun_reply_does_not_match_inside_word(handler, sdk, telegram):
-    await handler.handle(make_message("посижу нормально", entities=False), telegram)
+@pytest.mark.parametrize(
+    "text", ["посижу нормально", "привет", "спасибо", "что нового?", "чекаво?"]
+)
+async def test_common_phrases_do_not_trigger_auto_replies(handler, sdk, telegram, text):
+    await handler.handle(make_message(text, entities=False), telegram)
     sdk.responses.create.assert_not_awaited()
     telegram.send_message.assert_not_awaited()
 
 
 async def test_fun_replies_rotate_without_immediate_repeat(handler, sdk, telegram):
     replies = []
-    for _ in range(len(FUN_REPLIES["сижу"]) + 1):
-        await handler.handle(make_message("сижу", entities=False), telegram)
+    for _ in range(len(FUN_REPLIES["ептиль"]) + 1):
+        await handler.handle(make_message("ептиль", entities=False), telegram)
         replies.append(telegram.send_message.call_args.kwargs["text"])
-    assert len(set(replies[:-1])) == len(FUN_REPLIES["сижу"])
+    assert len(set(replies[:-1])) == len(FUN_REPLIES["ептиль"])
     assert replies[-1] != replies[-2]
 
 

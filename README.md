@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context, explicit URL reading and a local SQLite rolling cache. Application version: **1.6.0**.
+context, explicit URL reading and a local SQLite rolling cache. Application version: **1.7.0**.
 
 [Русский](#russian) · [English](#english)
 
@@ -69,15 +69,13 @@ Python 3.12; системного Python 3.10 из Ubuntu 22.04 недостат
 
 ### Локальные вариативные ответы
 
-Версия 1.3.0 добавляет готовые реакции на отдельные слова и фразы, например
-«ептиль», «ёптиль», «сижу», «привет», «норм» и «чекаво». Они содержат ненормативную
-лексику, отправляются без OpenAI и сохраняются как ответы нашего бота в cache.
-Проверка не зависит от регистра и не совпадает с частью слова. Для каждого trigger
-варианты перемешиваются и расходуются без повторов до завершения цикла; соседние
-циклы не дают одинаковый ответ подряд. Порядок общий для всех чатов и сбрасывается
-при restart. Сообщения с Telegram entity mention/text_mention/bot_command
-пропускают эти реакции: явные обращения к AI и команды сохраняют свои проверки,
-rate limiter и контекст. Edits, боты и анонимные отправители не запускают реакции.
+Оставлены только редкие локальные реакции на «ептиль» и «ёптиль». Приветствия,
+вопросительные слова, «сижу», «норм», «спасибо» и другие обычные фразы больше не
+вызывают автоответов. Эти две реакции содержат ненормативную лексику, не вызывают
+OpenAI и сохраняются в локальной истории. Проверка не зависит от регистра и не
+совпадает с частью слова; варианты перемешиваются без повторов до конца цикла.
+Явные mention и команды сохраняют свои проверки, rate limit и маршрутизацию. Edits,
+боты и анонимные отправители не запускают реакции.
 
 ### Анализ фото
 
@@ -346,6 +344,9 @@ downtime не восстанавливаются. Пустая история н
 в General. Сводка на русском явно предупреждает о неполноте данных; модель получает
 инструкцию не считать отсутствие ответа доказательством нерешённого вопроса.
 По умолчанию бюджет — 120000 символов input и 600 output tokens, включая reasoning.
+Заголовки разделов оформляются как обычный текст с эмодзи; Markdown-маркеры убираются,
+а длинный результат отправляется несколькими
+сообщениями в пределах лимита Telegram.
 
 SQLite хранит результат генерации, число попыток и подтверждения отправленных
 частей. Обычный сбой повторяется через 5 минут, Telegram FloodWait может увеличить
@@ -526,7 +527,7 @@ Telegram handlers не больше concurrency×4, общий AI timeout вкл
 bash -n install.sh
 ```
 
-**305 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
+**347 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
 SQLite — только temporary databases. Есть проверки 100 обычных updates → 0 AI/fetch,
 /context → 1 AI, snapshot, topics, roles/injection, edits, outgoing messages,
 5100→5000 cleanup per chat, concurrency, lifecycle, deadlines, UTF-16 и безопасных
@@ -626,14 +627,12 @@ Never send keys or .env to Telegram or commit them to Git.
 
 ### Local rotating replies
 
-Version 1.3.0 adds predefined reactions to Russian words and phrases, including
-«ептиль», «ёптиль», «сижу», «привет», «норм» and «чекаво». These replies contain
-profanity, never call OpenAI and are cached as outgoing bot messages. Matching is
-case-insensitive and respects word boundaries. Each trigger uses a shuffled cycle
-without repeats until exhausted; consecutive cycles avoid repeating the previous
-reply. Rotation is shared across chats and resets on restart. Messages containing
-mention/text_mention/bot_command Telegram entities bypass these reactions, preserving
-explicit AI routing, validation, rate limits and context. Edits, bots and anonymous
+Only the rare «ептиль» and «ёптиль» reactions remain enabled. Greetings, common
+question words, «сижу», «норм», «спасибо» and other ordinary phrases no longer trigger
+auto-replies. These two local replies contain profanity, never call OpenAI and are
+stored in local history. Matching is case-insensitive and respects word boundaries;
+reply variants rotate without repeats until exhausted. Explicit mentions and commands
+keep their existing validation, rate limits and routing. Edits, bots and anonymous
 senders do not trigger reactions.
 
 ### Photo questions
@@ -899,7 +898,8 @@ summarization request is made. Forum topics within one chat carry separate opaqu
 labels without internal IDs, and the digest is posted to General. Output is in Russian
 and explicitly warns about incomplete history; instructions prohibit interpreting a
 missing answer as proof that a question remains unresolved. Defaults: 120000 input
-characters and 600 output tokens, including reasoning.
+characters and 600 output tokens, including reasoning. Subsection headings are plain text
+with emojis; Markdown bold markers are removed, and long output is delivered across multiple Telegram messages within the message limit.
 
 SQLite persists generated text, attempt counts and acknowledged message parts.
 Recoverable failures retry after five minutes; Telegram FloodWait may extend this.
@@ -1078,7 +1078,7 @@ does not guarantee zero charges if the provider has started processing it.
 bash -n install.sh
 ```
 
-**305 offline tests** pass on Python 3.12. Tests block network
+**347 offline tests** pass on Python 3.12. Tests block network
 access and use temporary SQLite databases only. Coverage includes 100 ordinary
 updates → 0 AI/fetch, /context → 1 AI, snapshots, topics, roles/injection, edits,
 outgoing messages, per-chat 5100→5000 cleanup, concurrency, lifecycle, deadlines,

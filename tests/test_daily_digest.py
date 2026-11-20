@@ -23,6 +23,7 @@ from app.services.daily_digest import (
     RETRY_SECONDS,
     DailyDigestService,
     day_bounds,
+    format_digest,
     select_digest_messages,
 )
 from app.services.local_history import LocalHistoryService
@@ -79,6 +80,38 @@ async def state(digest):
 def advance(digest, seconds=RETRY_SECONDS + 1):
     now = digest._now()
     digest._now = lambda: now + timedelta(seconds=seconds)
+
+
+def test_digest_sections_use_plain_text_emoji_headings():
+    answer = """**Итоги**
+Главная тема.
+
+**Важные темы**:
+Тема A.
+
+Открытые вопросы
+Нет.
+
+Договорённости и задачи:
+Проверить."""
+
+    formatted = format_digest(answer)
+
+    assert (
+        formatted
+        == """📊 Итоги
+Главная тема.
+
+📌 Важные темы
+Тема A.
+
+❓ Открытые вопросы
+Нет.
+
+✅ Договорённости и задачи
+Проверить."""
+    )
+    assert "**" not in formatted
 
 
 async def test_success_cached_once_and_restart_has_no_duplicate(digest):
@@ -241,6 +274,19 @@ async def test_typing_failure_does_not_abort_digest(digest):
     )
     await digest.run_for_date(DAY)
     assert (await state(digest))["status"] == "sent"
+
+
+async def test_long_digest_is_split_without_markup_or_truncation(digest):
+    digest.model.generate_daily_digest.return_value = "Содержание. " * 1000
+    await digest.run_for_date(DAY)
+
+    parts = [call.kwargs["text"] for call in digest.bot.send_message.await_args_list]
+    assert len(parts) > 1
+    assert all(len(part.encode("utf-16-le")) // 2 <= 4096 for part in parts)
+    assert "".join(parts).endswith("Содержание. " * 1000)
+    assert all(
+        call.kwargs["parse_mode"] is None for call in digest.bot.send_message.await_args_list
+    )
 
 
 async def test_cached_partial_send_resumes_without_regenerating_or_resending(digest):

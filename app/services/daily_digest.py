@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -32,12 +33,38 @@ POLL_SECONDS = 60
 RETRY_SECONDS = 300
 MAX_ATTEMPTS = 3
 MARKER_RETENTION_DAYS = 30
-DIGEST_PROMPT = """Подготовь краткую сводку чата за {date}. Верни разделы:
-Итоги, Важные темы, Открытые вопросы, Договорённости и задачи.
-Не выдумывай факты. Это лишь сохранённая часть переписки, не полный архив дня.
-Отсутствие ответа не доказывает, что вопрос не решён. При недостатке данных явно
-укажи неопределённость. Не объединяй независимые Conversation topics в одну беседу.
-Ответ на русском, без markdown-таблиц."""
+DIGEST_SECTION_EMOJIS = {
+    "Итоги": "📊",
+    "Важные темы": "📌",
+    "Открытые вопросы": "❓",
+    "Договорённости и задачи": "✅",
+}
+_DIGEST_BOLD_PATTERN = re.compile(r"(\*\*|__)(.+?)\1", re.DOTALL)
+DIGEST_PROMPT = """Подготовь краткую сводку чата за {date}. Используй ровно эти заголовки разделов,
+каждый на отдельной строке:
+{section_headings}
+Не используй Markdown, звёздочки,
+подчёркивания, HTML или таблицы. Не выдумывай факты. Это лишь сохранённая часть
+переписки, не полный архив дня. Отсутствие ответа не доказывает, что вопрос не решён.
+При недостатке данных явно укажи неопределённость. Не объединяй независимые
+Conversation topics в одну беседу. Ответ на русском."""
+
+
+def format_digest(answer: str) -> str:
+    """Make model output readable as plain Telegram text and canonicalize headings."""
+    plain = _DIGEST_BOLD_PATTERN.sub(r"\2", answer)
+    lines = []
+    for line in plain.splitlines():
+        normalized = line.strip().strip("*").strip("_").strip()
+        normalized = re.sub(r"^#+\s*", "", normalized)
+        for title, emoji in DIGEST_SECTION_EMOJIS.items():
+            if re.fullmatch(
+                rf"(?:{re.escape(emoji)}\s*)?{re.escape(title)}\s*:?[ \t]*", normalized, re.I
+            ):
+                line = f"{emoji} {title}"
+                break
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def select_digest_messages(
@@ -138,7 +165,10 @@ class DailyDigestService:
             payload = state["payload"]
             if payload is None:
                 messages = await self.history.get_daily_messages(chat_id, start, end)
-                prompt = DIGEST_PROMPT.format(date=day)
+                section_headings = "\n".join(
+                    f"{emoji} {title}" for title, emoji in DIGEST_SECTION_EMOJIS.items()
+                )
+                prompt = DIGEST_PROMPT.format(date=day, section_headings=section_headings)
                 context = select_digest_messages(
                     messages, self.settings.daily_digest_context_chars, prompt
                 )
@@ -164,7 +194,7 @@ class DailyDigestService:
                     digest_date=day,
                 )
                 header = f"Сводка за {day} — по сохранённой части переписки, не полному архиву.\n\n"
-                payload = self.history.redact(header + answer)
+                payload = self.history.redact(header + format_digest(answer))
                 await self._update(chat_id, day, "ready", payload=payload)
             parts = split_telegram_text(payload)
             receipts = json.loads(state["sent_messages"])
