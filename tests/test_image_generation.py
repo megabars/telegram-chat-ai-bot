@@ -4,13 +4,20 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx2
 import pytest
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import SendPhoto
 from aiogram.types import MessageEntity, PhotoSize, User
+from openai import APIStatusError, APITimeoutError
 
 from app.handlers.messages import (
     EDIT_CHAT_LIMIT,
     EDIT_USER_LIMIT,
     IMAGE_CHAT_LIMIT,
+    IMAGE_DELIVERY_FAILED,
+    IMAGE_REJECTED,
+    IMAGE_TIMEOUT,
     IMAGE_USER_LIMIT,
 )
 from tests.conftest import make_message
@@ -218,6 +225,73 @@ async def test_edit_has_its_own_persisted_daily_quota(image_handler, sdk, telegr
     await image_handler.handle(mix, telegram)
     assert telegram.send_message.call_args.kwargs["text"] == IMAGE_USER_LIMIT
     assert sdk.images.edit.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("failure", "notice"),
+    [("rejected", IMAGE_REJECTED), ("timeout", IMAGE_TIMEOUT), ("telegram", IMAGE_DELIVERY_FAILED)],
+)
+async def test_failed_edits_release_quota(image_handler, sdk, telegram, caplog, failure, notice):
+    history = image_handler.local_history
+    config = replace(
+        image_handler.settings, image_edit_daily_user_limit=1, image_edit_daily_chat_limit=1
+    )
+    image_handler.settings = history.settings = config
+    parent = make_message(None, message_id=5, photo=[PHOTO])
+    request = httpx2.Request("POST", "https://api.openai.com/v1/images/edits")
+    if failure == "rejected":
+        sdk.images.edit.side_effect = APIStatusError(
+            "private response content",
+            response=httpx2.Response(400, request=request, headers={"x-request-id": "req_123"}),
+            body={"code": "moderation_blocked", "type": "image_generation_user_error"},
+        )
+    elif failure == "timeout":
+        sdk.images.edit.side_effect = APITimeoutError(request=request)
+    else:
+        telegram.send_photo.side_effect = TelegramNetworkError(
+            method=SendPhoto(chat_id=-100123, photo="photo"), message="private response content"
+        )
+
+    await image_handler.handle(
+        command("/edit замени фон", message_id=10, reply_to_message=parent), telegram
+    )
+    assert telegram.send_message.call_args.kwargs["text"] == notice
+    assert "private response content" not in caplog.text
+    if failure == "rejected":
+        assert "api_code=moderation_blocked" in caplog.text
+        assert "request_id=req_123" in caplog.text
+    elif failure == "timeout":
+        assert "kind=timeout stage=api" in caplog.text
+    assert await history._db().execute_fetchall("SELECT * FROM image_edit_requests") == []
+
+    sdk.images.edit.side_effect = telegram.send_photo.side_effect = None
+    await image_handler.handle(
+        command("/edit замени фон", message_id=11, reply_to_message=parent), telegram
+    )
+    await image_handler.handle(
+        command("/edit замени фон", message_id=12, reply_to_message=parent), telegram
+    )
+    assert telegram.send_message.call_args.kwargs["text"] == EDIT_USER_LIMIT
+    rows = await history._db().execute_fetchall(
+        "SELECT message_id, pending_until FROM image_edit_requests"
+    )
+    assert [(row["message_id"], row["pending_until"]) for row in rows] == [(11, None)]
+
+
+async def test_expired_image_reservation_stops_counting_after_restart(local_history):
+    local_history.settings = replace(local_history.settings, image_generation_enabled=True)
+
+    async def claim(message_id):
+        return await local_history.claim_image_request(
+            -100123, message_id, 10, "2026-11-20", user_limit=1, chat_limit=1, editing=True
+        )
+
+    assert await claim(1) == "accepted"
+    assert await claim(2) == "user_limit"
+    await local_history._db().execute("UPDATE image_edit_requests SET pending_until=1")
+    await local_history.close()
+    await local_history.start()
+    assert await claim(2) == "accepted"
 
 
 async def test_disallowed_chat_does_not_generate(image_handler, sdk, telegram):

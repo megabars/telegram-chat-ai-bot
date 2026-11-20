@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import re
 from time import monotonic
 
 from openai import (
@@ -53,6 +54,18 @@ class ModelUnavailable(Exception):
 
 class ModelRateLimited(ModelUnavailable):
     pass
+
+
+class ImageRequestRejected(ModelUnavailable):
+    pass
+
+
+class ImageRequestTimeout(ModelUnavailable):
+    pass
+
+
+def _image_error_field(value: str | None, pattern: str) -> str:
+    return value if isinstance(value, str) and re.fullmatch(pattern, value) else "unknown"
 
 
 def _request_input_chars(request_input: str | list[dict]) -> int:
@@ -281,6 +294,7 @@ class OpenAIService:
             f"chat_id={chat_id} message_id={message_id}"
         )
         queued_at = monotonic()
+        api_started = None
         logger.info("OpenAI request queued %s", metadata)
         try:
             async with asyncio.timeout(self.settings.image_generation_timeout_seconds):
@@ -313,12 +327,15 @@ class OpenAIService:
                         )
             encoded = response.data[0].b64_json if response.data else None
             if not encoded:
+                logger.warning("OpenAI request failed %s kind=empty_image", metadata)
                 raise ModelUnavailable
             try:
                 result = base64.b64decode(encoded, validate=True)
             except (ValueError, base64.binascii.Error):
+                logger.warning("OpenAI request failed %s kind=invalid_base64", metadata)
                 raise ModelUnavailable from None
             if not result.startswith(b"\xff\xd8\xff"):
+                logger.warning("OpenAI request failed %s kind=invalid_jpeg", metadata)
                 raise ModelUnavailable
             usage = getattr(response, "usage", None)
             logger.info(
@@ -342,8 +359,13 @@ class OpenAIService:
             logger.warning("OpenAI request failed %s kind=rate_limit", metadata)
             raise ModelRateLimited from None
         except (APITimeoutError, TimeoutError):
-            logger.warning("OpenAI request failed %s kind=timeout", metadata)
-            raise ModelUnavailable from None
+            logger.warning(
+                "OpenAI request failed %s kind=timeout stage=%s total_duration_ms=%d",
+                metadata,
+                "api" if api_started is not None else "queue",
+                (monotonic() - queued_at) * 1000,
+            )
+            raise ImageRequestTimeout from None
         except AuthenticationError:
             logger.error("OpenAI request failed %s kind=authentication", metadata)
             raise ModelUnavailable from None
@@ -352,8 +374,17 @@ class OpenAIService:
             raise ModelUnavailable from None
         except APIStatusError as exc:
             logger.error(
-                "OpenAI request failed %s kind=status status=%d", metadata, exc.status_code
+                "OpenAI request failed %s kind=status status=%d "
+                "api_code=%s api_type=%s request_id=%s total_duration_ms=%d",
+                metadata,
+                exc.status_code,
+                _image_error_field(exc.code, r"[a-z][a-z0-9_]{0,63}"),
+                _image_error_field(exc.type, r"[a-z][a-z0-9_]{0,63}"),
+                _image_error_field(exc.request_id, r"req_[a-zA-Z0-9_]{1,64}"),
+                (monotonic() - queued_at) * 1000,
             )
+            if exc.status_code in {400, 422}:
+                raise ImageRequestRejected from None
             raise ModelUnavailable from None
         except OpenAIError as exc:
             logger.error("OpenAI request failed %s kind=%s", metadata, type(exc).__name__)
