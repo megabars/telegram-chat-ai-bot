@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.types import MessageEntity, PhotoSize, User
 
-from app.handlers.messages import IMAGE_CHAT_LIMIT, IMAGE_USER_LIMIT
+from app.handlers.messages import (
+    EDIT_CHAT_LIMIT,
+    EDIT_USER_LIMIT,
+    IMAGE_CHAT_LIMIT,
+    IMAGE_USER_LIMIT,
+)
 from tests.conftest import make_message
 
 JPEG = b"\xff\xd8\xfftest-image"
@@ -37,8 +42,8 @@ def album_photo(message_id, album_id, *, caption=None):
 
 
 @pytest.fixture
-def image_handler(handler, local_history, settings, sdk, telegram):
-    config = replace(settings, local_history_enabled=True, image_generation_enabled=True)
+def image_handler(handler, local_history, sdk, telegram):
+    config = replace(local_history.settings, image_generation_enabled=True)
     handler.settings = local_history.settings = handler.service.settings = config
     handler.local_history = local_history
     sdk.images = SimpleNamespace(
@@ -162,6 +167,57 @@ async def test_handler_enforces_image_limits(image_handler, sdk, telegram):
     )
     assert telegram.send_message.call_args.kwargs["text"] == IMAGE_CHAT_LIMIT
     assert sdk.images.generate.await_count == 2
+
+
+async def test_edit_has_its_own_persisted_daily_quota(image_handler, sdk, telegram):
+    history = image_handler.local_history
+    config = replace(
+        image_handler.settings,
+        image_daily_user_limit=1,
+        image_daily_chat_limit=1,
+        image_edit_daily_user_limit=1,
+        image_edit_daily_chat_limit=2,
+    )
+    image_handler.settings = history.settings = config
+    parent = make_message(None, message_id=5, photo=[PHOTO])
+
+    async def edit(message_id, user_id):
+        await image_handler.handle(
+            command(
+                "/edit замени фон",
+                message_id=message_id,
+                reply_to_message=parent,
+                from_user=User(id=user_id, is_bot=False, first_name="Human"),
+            ),
+            telegram,
+        )
+
+    await edit(10, 10)
+    await history.close()
+    await history.start()
+    await edit(10, 10)
+    sdk.images.edit.assert_awaited_once()
+    await edit(11, 10)
+    assert telegram.send_message.call_args.kwargs["text"] == EDIT_USER_LIMIT
+
+    await edit(12, 11)
+    await edit(13, 12)
+    assert telegram.send_message.call_args.kwargs["text"] == EDIT_CHAT_LIMIT
+    assert sdk.images.edit.await_count == 2
+
+    await image_handler.handle(command("/image кот", message_id=14), telegram)
+    sdk.images.generate.assert_awaited_once()
+    mix = make_message(
+        None,
+        message_id=15,
+        caption="/mix объедини",
+        caption_entities=[MessageEntity(type="bot_command", offset=0, length=4)],
+        photo=[PHOTO],
+        reply_to_message=parent,
+    )
+    await image_handler.handle(mix, telegram)
+    assert telegram.send_message.call_args.kwargs["text"] == IMAGE_USER_LIMIT
+    assert sdk.images.edit.await_count == 2
 
 
 async def test_disallowed_chat_does_not_generate(image_handler, sdk, telegram):

@@ -54,6 +54,8 @@ IMAGE_USAGE = (
 )
 IMAGE_USER_LIMIT = "Твой суточный лимит генерации изображений исчерпан. Попробуй завтра."
 IMAGE_CHAT_LIMIT = "Суточный лимит генерации изображений для чата исчерпан. Попробуйте завтра."
+EDIT_USER_LIMIT = "Твой суточный лимит редактирования фото исчерпан. Попробуй завтра."
+EDIT_CHAT_LIMIT = "Суточный лимит редактирования фото для чата исчерпан. Попробуйте завтра."
 MIX_WRONG_SCOPE = "Для /mix ответь вторым фото на первое фото в этом чате и теме."
 MIX_ALBUM_SIZE = "Для /mix нужно 2–4 фото в одном альбоме."
 EDIT_WRONG_SCOPE = "Для /edit приложи фото или ответь командой на фото в этом чате и теме."
@@ -413,6 +415,7 @@ class MessageHandler:
             )
             return
         photos = None
+        editing = mix_args is None and edit_args is not None
         if mix_args is not None:
             if message.media_group_id:
                 await asyncio.sleep(2)
@@ -454,7 +457,7 @@ class MessageHandler:
                     max(parent.photo, key=lambda item: item.width * item.height),
                     max(message.photo, key=lambda item: item.width * item.height),
                 )
-        elif edit_args is not None:
+        elif editing:
             photo = self._photo_for_question(message)
             if photo is None:
                 await self._send(bot, message, EDIT_WRONG_SCOPE)
@@ -472,7 +475,7 @@ class MessageHandler:
                     await self._send(bot, message, PHOTO_TOO_LARGE)
                     return
                 except PHOTO_DOWNLOAD_ERRORS as exc:
-                    logger.warning("Mix photo download failed kind=%s", type(exc).__name__)
+                    logger.warning("Image source download failed kind=%s", type(exc).__name__)
                     await self._send(bot, message, PHOTO_UNAVAILABLE)
                     return
             day = (
@@ -481,25 +484,26 @@ class MessageHandler:
                 .date()
                 .isoformat()
             )
+            if editing:
+                user_limit = self.settings.image_edit_daily_user_limit
+                chat_limit = self.settings.image_edit_daily_chat_limit
+                quota_notices = {"user_limit": EDIT_USER_LIMIT, "chat_limit": EDIT_CHAT_LIMIT}
+            else:
+                user_limit = self.settings.image_daily_user_limit
+                chat_limit = self.settings.image_daily_chat_limit
+                quota_notices = {"user_limit": IMAGE_USER_LIMIT, "chat_limit": IMAGE_CHAT_LIMIT}
             claimed = await self.local_history.claim_image_request(
                 message.chat.id,
                 message.message_id,
                 message.from_user.id,
                 day,
-                user_limit=self.settings.image_daily_user_limit,
-                chat_limit=self.settings.image_daily_chat_limit,
+                user_limit=user_limit,
+                chat_limit=chat_limit,
+                editing=editing,
             )
             if claimed != "accepted":
-                if claimed == "duplicate":
-                    return
-                notice = (
-                    IMAGE_USER_LIMIT
-                    if claimed == "user_limit"
-                    else IMAGE_CHAT_LIMIT
-                    if claimed == "chat_limit"
-                    else IMAGE_DISABLED
-                )
-                await self._send(bot, message, notice)
+                if claimed != "duplicate":
+                    await self._send(bot, message, quota_notices.get(claimed, IMAGE_DISABLED))
                 return
             try:
                 generated = await self.service.generate_image(

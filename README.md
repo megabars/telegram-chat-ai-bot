@@ -1,7 +1,7 @@
 # Telegram Chat AI Bot
 
 Python Telegram group assistant using the OpenAI Responses API, exact reply-chain
-context, explicit URL reading and a local SQLite rolling cache. Application version: **1.7.0**.
+context, explicit URL reading and a local SQLite rolling cache. Application version: **1.7.1**.
 
 [Русский](#russian) · [English](#english)
 
@@ -117,8 +117,9 @@ SQLite хранит только текст подписи либо `[photo]`, �
 ограничивают расход; модель задаётся через `IMAGE_GENERATION_MODEL`. При `/mix`
 исходные фото размером до 10 МиБ каждое скачиваются только после проверок и не
 сохраняются в SQLite. Полученное изображение публикуется в исходной теме.
-Счётчики генерации, редактирования и объединения общие и независимы от анализа фото: **3 попытки
-на пользователя и 10 на чат за сутки** по `Asia/Tomsk`. Они сохраняются при
+У `/edit` отдельная квота: **15 попыток на пользователя в чате и 30 на весь чат за сутки**.
+Команды `/image` и `/mix` делят квоту в **3 попытки на пользователя в чате и 10 на весь чат**.
+Обе квоты сбрасываются в полночь по `Asia/Tomsk` и сохраняются при
 перезапуске; ошибка Image API после отправки запроса расходует попытку, а ошибка
 проверки альбома или загрузки фото — нет. Изображения и текст описания не пишутся
 в журнал; видны тип запроса, размеры, длительность и usage, если его вернул API.
@@ -241,9 +242,11 @@ Telegram chat/message ID для сопоставления с исходным �
 | `IMAGE_GENERATION_ENABLED` | `false` | Разрешить `/image`, `/edit` и `/mix` |
 | `IMAGE_GENERATION_MODEL` | `gpt-image-2.5-flare` | Модель OpenAI Image API |
 | `IMAGE_GENERATION_TIMEOUT_SECONDS` | `180` | Общий таймаут генерации с ожиданием очереди |
-| `IMAGE_DAILY_USER_LIMIT` | `3` | Попыток `/image`, `/edit` и `/mix` на пользователя за сутки |
-| `IMAGE_DAILY_CHAT_LIMIT` | `10` | Попыток `/image`, `/edit` и `/mix` на весь чат за сутки |
-| `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Временная зона календарного дня для генерации |
+| `IMAGE_DAILY_USER_LIMIT` | `3` | Попыток `/image` и `/mix` на пользователя в чате за сутки |
+| `IMAGE_DAILY_CHAT_LIMIT` | `10` | Попыток `/image` и `/mix` на весь чат за сутки |
+| `IMAGE_EDIT_DAILY_USER_LIMIT` | `15` | Попыток `/edit` на пользователя в чате за сутки |
+| `IMAGE_EDIT_DAILY_CHAT_LIMIT` | `30` | Попыток `/edit` на весь чат за сутки |
+| `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Временная зона календарного дня для квот изображений |
 | `LINK_READ_ENABLED` | `false` | Разрешить `/link` для чтения только явно переданного URL |
 | `LINK_DAILY_USER_LIMIT` | `3` | Попыток чтения ссылки на пользователя за сутки |
 | `LINK_DAILY_CHAT_LIMIT` | `10` | Попыток чтения ссылки на чат за сутки |
@@ -527,7 +530,7 @@ Telegram handlers не больше concurrency×4, общий AI timeout вкл
 bash -n install.sh
 ```
 
-**347 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
+**348 офлайн-тестов** проходят на Python 3.12; сеть в тестах блокируется,
 SQLite — только temporary databases. Есть проверки 100 обычных updates → 0 AI/fetch,
 /context → 1 AI, snapshot, topics, roles/injection, edits, outgoing messages,
 5100→5000 cleanup per chat, concurrency, lifecycle, deadlines, UTF-16 и безопасных
@@ -671,9 +674,10 @@ The OpenAI Image API uses `gpt-image-2.5-flare` by default, low quality,
 `1024x1024`, JPEG output and one result per call. `IMAGE_GENERATION_MODEL` can
 change the model. Each `/mix` source is limited to 10 MiB and is downloaded only
 after validation. Image bytes are not stored in SQLite. The result is posted
-in the same topic. Generation, editing and mixing share separate persisted daily quotas:
-**3 attempts per user and 10 per chat** in `Asia/Tomsk`. These quotas are
-independent of photo analysis. Failed Image API attempts consume a slot; invalid
+in the same topic. The separate `/edit` quota allows **15 attempts per user in a chat
+and 30 per chat per day**. The `/image` and `/mix` commands share **3 attempts per user
+in a chat and 10 per chat per day**. Both quotas persist across restarts and reset at
+midnight in `Asia/Tomsk` by default. Failed Image API attempts consume a slot. Invalid
 albums and failed downloads do not. Prompts and images are excluded from logs;
 request type, byte counts, duration and available API usage are logged.
 
@@ -795,9 +799,11 @@ include Telegram chat/message IDs to match them with the incoming message.
 | `IMAGE_GENERATION_ENABLED` | `false` | Enable `/image`, `/edit` and `/mix` |
 | `IMAGE_GENERATION_MODEL` | `gpt-image-2.5-flare` | OpenAI Image API model |
 | `IMAGE_GENERATION_TIMEOUT_SECONDS` | `180` | Generation deadline including queue wait |
-| `IMAGE_DAILY_USER_LIMIT` | `3` | `/image`, `/edit` and `/mix` attempts per user per day |
-| `IMAGE_DAILY_CHAT_LIMIT` | `10` | `/image`, `/edit` and `/mix` attempts per chat per day |
-| `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Timezone for generation quota calendar days |
+| `IMAGE_DAILY_USER_LIMIT` | `3` | `/image` and `/mix` attempts per user in a chat per day |
+| `IMAGE_DAILY_CHAT_LIMIT` | `10` | `/image` and `/mix` attempts per chat per day |
+| `IMAGE_EDIT_DAILY_USER_LIMIT` | `15` | `/edit` attempts per user in a chat per day |
+| `IMAGE_EDIT_DAILY_CHAT_LIMIT` | `30` | `/edit` attempts per chat per day |
+| `IMAGE_DAILY_TIMEZONE` | `Asia/Tomsk` | Timezone for image quota calendar days |
 | `LINK_READ_ENABLED` | `false` | Enable `/link` for an explicitly supplied URL only |
 | `LINK_DAILY_USER_LIMIT` | `3` | Link-reading attempts per user per day |
 | `LINK_DAILY_CHAT_LIMIT` | `10` | Link-reading attempts per chat per day |
@@ -1078,7 +1084,7 @@ does not guarantee zero charges if the provider has started processing it.
 bash -n install.sh
 ```
 
-**347 offline tests** pass on Python 3.12. Tests block network
+**348 offline tests** pass on Python 3.12. Tests block network
 access and use temporary SQLite databases only. Coverage includes 100 ordinary
 updates → 0 AI/fetch, /context → 1 AI, snapshots, topics, roles/injection, edits,
 outgoing messages, per-chat 5100→5000 cleanup, concurrency, lifecycle, deadlines,

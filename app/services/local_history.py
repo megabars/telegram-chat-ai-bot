@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS image_generation_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_image_generation_requests_daily
 ON image_generation_requests(day, chat_id, user_id);
+CREATE TABLE IF NOT EXISTS image_edit_requests (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_image_edit_requests_daily
+ON image_edit_requests(day, chat_id, user_id);
 CREATE TABLE IF NOT EXISTS link_read_requests (
     chat_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
@@ -364,11 +374,13 @@ class LocalHistoryService:
         *,
         user_limit: int,
         chat_limit: int,
+        editing: bool = False,
     ) -> str:
         if not self.settings.image_generation_enabled or not self._allowed(chat_id):
             return "forbidden"
+        table = "image_edit_requests" if editing else "image_generation_requests"
         return await self._claim_daily_request(
-            "image_generation_requests", chat_id, message_id, user_id, day, user_limit, chat_limit
+            table, chat_id, message_id, user_id, day, user_limit, chat_limit
         )
 
     async def claim_link_request(
