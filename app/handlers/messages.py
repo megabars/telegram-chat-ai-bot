@@ -15,7 +15,13 @@ from aiogram.types import BufferedInputFile, LinkPreviewOptions, Message, PhotoS
 
 from app.config import Settings
 from app.services.local_history import LocalHistoryService
-from app.services.openai_service import ModelRateLimited, ModelUnavailable, OpenAIService
+from app.services.openai_service import (
+    ImageRequestRejected,
+    ImageRequestTimeout,
+    ModelRateLimited,
+    ModelUnavailable,
+    OpenAIService,
+)
 from app.services.telegram_history import TelegramHistoryService
 from app.services.url_reader import UrlFetchError, fetch_page
 from app.utils.context_command import (
@@ -60,6 +66,9 @@ MIX_WRONG_SCOPE = "Для /mix ответь вторым фото на перв�
 MIX_ALBUM_SIZE = "Для /mix нужно 2–4 фото в одном альбоме."
 EDIT_WRONG_SCOPE = "Для /edit приложи фото или ответь командой на фото в этом чате и теме."
 IMAGE_TOO_LARGE = "Получившееся изображение слишком большое для Telegram."
+IMAGE_REJECTED = "Сервис изображений отклонил запрос. Попробуй изменить описание или фото."
+IMAGE_TIMEOUT = "Сервис изображений не успел ответить. Попробуй ещё раз."
+IMAGE_DELIVERY_FAILED = "Не удалось отправить картинку в Telegram. Попробуй ещё раз."
 LINK_DISABLED = "Чтение ссылок пока отключено."
 LINK_USAGE = "Используй: /link https://example.com что нужно узнать со страницы?"
 LINK_USER_LIMIT = "Твой суточный лимит чтения ссылок исчерпан. Попробуй завтра."
@@ -475,7 +484,12 @@ class MessageHandler:
                     await self._send(bot, message, PHOTO_TOO_LARGE)
                     return
                 except PHOTO_DOWNLOAD_ERRORS as exc:
-                    logger.warning("Image source download failed kind=%s", type(exc).__name__)
+                    logger.warning(
+                        "Image source download failed chat_id=%d message_id=%d kind=%s",
+                        message.chat.id,
+                        message.message_id,
+                        type(exc).__name__,
+                    )
                     await self._send(bot, message, PHOTO_UNAVAILABLE)
                     return
             day = (
@@ -505,36 +519,73 @@ class MessageHandler:
                 if claimed != "duplicate":
                     await self._send(bot, message, quota_notices.get(claimed, IMAGE_DISABLED))
                 return
+            sent = None
             try:
-                generated = await self.service.generate_image(
-                    prompt, images=images, chat_id=message.chat.id, message_id=message.message_id
-                )
-            except ModelRateLimited:
-                await self._send(bot, message, MODEL_RATE_LIMIT)
-                return
-            except ModelUnavailable:
-                await self._send(bot, message, TEMPORARY_ERROR)
-                return
-            if len(generated) > MAX_PHOTO_BYTES:
-                logger.warning(
-                    "Generated image exceeds Telegram photo limit bytes=%d", len(generated)
-                )
-                await self._send(bot, message, IMAGE_TOO_LARGE)
-                return
-            try:
-                sent = await bot.send_photo(
-                    chat_id=message.chat.id,
-                    photo=BufferedInputFile(generated, filename="image.jpg"),
-                    message_thread_id=message.message_thread_id,
-                    reply_parameters=ReplyParameters(
-                        message_id=message.message_id, allow_sending_without_reply=True
-                    ),
-                )
-            except TELEGRAM_ERRORS as exc:
-                logger.warning("Telegram image send failure kind=%s", type(exc).__name__)
-                return
+                sent, notice = await self._deliver_image(bot, message, prompt, images)
+            finally:
+                try:
+                    await self.local_history.finish_image_request(
+                        message.chat.id,
+                        message.message_id,
+                        editing=editing,
+                        delivered=sent is not None,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Image quota update failed chat_id=%d message_id=%d delivered=%s kind=%s",
+                        message.chat.id,
+                        message.message_id,
+                        sent is not None,
+                        type(exc).__name__,
+                    )
+            if notice:
+                await self._send(bot, message, notice)
             if isinstance(sent, Message):
                 await self._store(sent)
+
+    async def _deliver_image(
+        self, bot: Bot, message: Message, prompt: str, images: list[bytes] | None
+    ) -> tuple[Message | None, str | None]:
+        chat_id, message_id = message.chat.id, message.message_id
+        try:
+            generated = await self.service.generate_image(
+                prompt, images=images, chat_id=chat_id, message_id=message_id
+            )
+        except ModelRateLimited:
+            return None, MODEL_RATE_LIMIT
+        except ImageRequestRejected:
+            return None, IMAGE_REJECTED
+        except ImageRequestTimeout:
+            return None, IMAGE_TIMEOUT
+        except ModelUnavailable:
+            return None, TEMPORARY_ERROR
+        if len(generated) > MAX_PHOTO_BYTES:
+            logger.warning(
+                "Image exceeds Telegram photo limit chat_id=%d message_id=%d bytes=%d",
+                chat_id,
+                message_id,
+                len(generated),
+            )
+            return None, IMAGE_TOO_LARGE
+        try:
+            sent = await bot.send_photo(
+                chat_id=chat_id,
+                photo=BufferedInputFile(generated, filename="image.jpg"),
+                message_thread_id=message.message_thread_id,
+                reply_parameters=ReplyParameters(
+                    message_id=message_id, allow_sending_without_reply=True
+                ),
+            )
+        except TELEGRAM_ERRORS as exc:
+            logger.warning(
+                "Telegram image send failure chat_id=%d message_id=%d kind=%s",
+                chat_id,
+                message_id,
+                type(exc).__name__,
+            )
+            return None, IMAGE_DELIVERY_FAILED
+        logger.info("Image delivered chat_id=%d message_id=%d", chat_id, message_id)
+        return sent, None
 
     async def _handle_link(self, message: Message, bot: Bot, args: str) -> None:
         if not self.settings.link_read_enabled or self.local_history is None:

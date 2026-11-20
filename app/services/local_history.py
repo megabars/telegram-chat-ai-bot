@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -14,6 +15,7 @@ from app.utils.local_message import forum_topic_id, local_message_content
 from app.utils.reply_context import ContextMessage
 
 logger = logging.getLogger(__name__)
+IMAGE_QUOTA_TABLES = {False: "image_generation_requests", True: "image_edit_requests"}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS telegram_messages (
     chat_id INTEGER NOT NULL,
@@ -65,6 +67,7 @@ CREATE TABLE IF NOT EXISTS image_generation_requests (
     user_id INTEGER NOT NULL,
     day TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    pending_until INTEGER,
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_image_generation_requests_daily
@@ -75,6 +78,7 @@ CREATE TABLE IF NOT EXISTS image_edit_requests (
     user_id INTEGER NOT NULL,
     day TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    pending_until INTEGER,
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_image_edit_requests_daily
@@ -124,6 +128,7 @@ class LocalHistoryService:
             await self._connection.execute("PRAGMA foreign_keys=ON")
             await self._connection.executescript(SCHEMA)
             await self._migrate_digest_schema()
+            await self._migrate_image_quota_schema()
             rows = await self._connection.execute_fetchall(
                 "SELECT chat_id, COUNT(*) AS count FROM telegram_messages GROUP BY chat_id"
             )
@@ -378,10 +383,32 @@ class LocalHistoryService:
     ) -> str:
         if not self.settings.image_generation_enabled or not self._allowed(chat_id):
             return "forbidden"
-        table = "image_edit_requests" if editing else "image_generation_requests"
         return await self._claim_daily_request(
-            table, chat_id, message_id, user_id, day, user_limit, chat_limit
+            IMAGE_QUOTA_TABLES[editing],
+            chat_id,
+            message_id,
+            user_id,
+            day,
+            user_limit,
+            chat_limit,
+            # Leave time for Telegram delivery after the model deadline.
+            reservation_seconds=math.ceil(self.settings.image_generation_timeout_seconds) + 120,
         )
+
+    async def finish_image_request(
+        self, chat_id: int, message_id: int, *, editing: bool, delivered: bool
+    ) -> None:
+        table = IMAGE_QUOTA_TABLES[editing]
+        statement = (
+            f"UPDATE {table} SET pending_until=NULL" if delivered else f"DELETE FROM {table}"
+        )
+        async with self._lock:
+            await self._finish_write(
+                self._db().execute(
+                    f"{statement} WHERE chat_id=? AND message_id=? AND pending_until IS NOT NULL",
+                    (chat_id, message_id),
+                )
+            )
 
     async def claim_link_request(
         self,
@@ -408,6 +435,8 @@ class LocalHistoryService:
         day: str,
         user_limit: int,
         chat_limit: int,
+        *,
+        reservation_seconds: int | None = None,
     ) -> str:
         # Table is selected only by these constant wrapper methods.
         before = (date.fromisoformat(day) - timedelta(days=30)).isoformat()
@@ -417,7 +446,10 @@ class LocalHistoryService:
                 db = self._db()
                 try:
                     await db.execute("BEGIN IMMEDIATE")
+                    now = int(datetime.now(UTC).timestamp())
                     await db.execute(f"DELETE FROM {table} WHERE day<?", (before,))
+                    if reservation_seconds is not None:
+                        await db.execute(f"DELETE FROM {table} WHERE pending_until<=?", (now,))
                     existing = await db.execute_fetchall(
                         f"SELECT 1 FROM {table} WHERE chat_id=? AND message_id=?",
                         (chat_id, message_id),
@@ -445,9 +477,15 @@ class LocalHistoryService:
                                     message_id,
                                     user_id,
                                     day,
-                                    int(datetime.now(UTC).timestamp()),
+                                    now,
                                 ),
                             )
+                            if reservation_seconds is not None:
+                                await db.execute(
+                                    f"UPDATE {table} SET pending_until=? "
+                                    "WHERE chat_id=? AND message_id=?",
+                                    (now + reservation_seconds, chat_id, message_id),
+                                )
                             result = "accepted"
                     await db.commit()
                     return result
@@ -456,6 +494,20 @@ class LocalHistoryService:
                     raise
 
             return await self._finish_write(claim())
+
+    async def _migrate_image_quota_schema(self) -> None:
+        db = self._db()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            for table in IMAGE_QUOTA_TABLES.values():
+                columns = await db.execute_fetchall(f"PRAGMA table_info({table})")
+                if not any(column["name"] == "pending_until" for column in columns):
+                    # Existing quota rows continue to count until their day ends.
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN pending_until INTEGER")
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
 
     async def _migrate_digest_schema(self) -> None:
         # Upgrade the original PR schema without resetting existing delivery markers.
